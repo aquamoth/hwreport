@@ -204,6 +204,45 @@ function Get-DiskType($physicalMediaType, $mediaType, $model, $status) {
   return $null
 }
 
+function Is-RemovableDisk($disk, $physicalDisk) {
+  $mediaType = Normalize-Text $disk.MediaType
+  if ($mediaType -eq 'Removable Media') { return $true }
+
+  $pnpDeviceId = Normalize-Text $disk.PNPDeviceID
+  $model = Normalize-Text $disk.Model
+  if ($pnpDeviceId -like 'USBSTOR*' -and $model -like '*USB Device*') { return $true }
+
+  return $false
+}
+
+function Get-SmartStatus($physicalDisk, $predictFailure) {
+  if ($predictFailure -eq $true) {
+    return 'warning'
+  }
+
+  if ($physicalDisk) {
+    $health = Normalize-Text $physicalDisk.health_status
+    switch ($health) {
+      'Healthy' { return 'ok' }
+      'Warning' { return 'warning' }
+      'Unhealthy' { return 'error' }
+    }
+
+    $operational = @($physicalDisk.operational_status | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($status in $operational) {
+      switch ($status) {
+        'OK' { return 'ok' }
+        'Degraded' { return 'warning' }
+        'Predictive Failure' { return 'warning' }
+        'Lost Communication' { return 'error' }
+        'Error' { return 'error' }
+      }
+    }
+  }
+
+  return $null
+}
+
 function Convert-ToRotationDegrees($value) {
   switch ([int]$value) {
     0 { return 0 }
@@ -225,6 +264,8 @@ public sealed class DisplayRotationInfo
     public string DeviceName { get; set; }
     public string MonitorId { get; set; }
     public int? RotationDegrees { get; set; }
+    public int? PixelWidth { get; set; }
+    public int? PixelHeight { get; set; }
 }
 
 public static class DisplayInventory
@@ -333,7 +374,9 @@ public static class DisplayInventory
                 {
                     DeviceName = adapter.DeviceName,
                     MonitorId = monitor.DeviceID,
-                    RotationDegrees = rotation
+                    RotationDegrees = rotation,
+                    PixelWidth = mode.dmPelsWidth,
+                    PixelHeight = mode.dmPelsHeight
                 });
             }
         }
@@ -396,6 +439,9 @@ $physicalDisks = foreach ($item in $physicalDisksRaw) {
     key = Normalize-Key $item.FriendlyName
     manufacturer = Normalize-Manufacturer $item.Manufacturer
     media_type = Normalize-Text $item.MediaType
+    bus_type = Normalize-Text $item.BusType
+    health_status = Normalize-Text $item.HealthStatus
+    operational_status = @($item.OperationalStatus | ForEach-Object { Normalize-Text $_ } | Where-Object { $_ })
     size = if ($null -ne $item.Size) { [uint64]$item.Size } else { $null }
   }
 }
@@ -412,11 +458,15 @@ $desktopMonitors = foreach ($item in $desktopMonitorsRaw) {
   }
 }
 
-$rotationByKey = @{}
+$displayByKey = @{}
 foreach ($item in [DisplayInventory]::GetRotations()) {
   $monitorKey = Normalize-MonitorIdentityKey $item.MonitorId
   if (-not $monitorKey) { continue }
-  $rotationByKey[$monitorKey] = Convert-ToRotationDegrees $item.RotationDegrees
+  $displayByKey[$monitorKey] = [ordered]@{
+    rotation_degrees = Convert-ToRotationDegrees $item.RotationDegrees
+    pixel_width = if ($null -ne $item.PixelWidth -and [int]$item.PixelWidth -gt 0) { [uint32]$item.PixelWidth } else { $null }
+    pixel_height = if ($null -ne $item.PixelHeight -and [int]$item.PixelHeight -gt 0) { [uint32]$item.PixelHeight } else { $null }
+  }
 }
 
 $monitorParamsByKey = @{}
@@ -468,13 +518,18 @@ foreach ($disk in $disksRaw) {
     }
   }
 
-  $smartStatus = 'unavailable'
+  if (Is-RemovableDisk $disk $physicalDisk) {
+    continue
+  }
+
+  $predictFailure = $null
   foreach ($entry in $smartByKey.GetEnumerator()) {
     if (Match-Key $entry.Key $pnpKey -or Match-Key $entry.Key $deviceKey) {
-      $smartStatus = $entry.Value
+      $predictFailure = ($entry.Value -eq 'warning')
       break
     }
   }
+  $smartStatus = Get-SmartStatus $physicalDisk $predictFailure
 
   [ordered]@{
     manufacturer = Normalize-Manufacturer $(if ($physicalDisk -and $physicalDisk.manufacturer) { $physicalDisk.manufacturer } elseif ($disk.Manufacturer) { $disk.Manufacturer } elseif ($media) { $media.Manufacturer } else { $null })
@@ -515,10 +570,10 @@ foreach ($monitor in $monitorIDsRaw) {
     }
   }
   $params = $monitorParamsByKey[$instanceKey]
-  $rotation = $null
-  foreach ($entry in $rotationByKey.GetEnumerator()) {
+  $displayInfo = $null
+  foreach ($entry in $displayByKey.GetEnumerator()) {
     if (Match-Key $entry.Key $instanceKey) {
-      $rotation = $entry.Value
+      $displayInfo = $entry.Value
       break
     }
   }
@@ -537,12 +592,12 @@ foreach ($monitor in $monitorIDsRaw) {
   [ordered]@{
     manufacturer = $manufacturer
     model = $model
-    pixel_width = $(if ($desktop) { $desktop.pixel_width } else { $null })
-    pixel_height = $(if ($desktop) { $desktop.pixel_height } else { $null })
+    pixel_width = $(if ($displayInfo) { $displayInfo.pixel_width } elseif ($desktop) { $desktop.pixel_width } else { $null })
+    pixel_height = $(if ($displayInfo) { $displayInfo.pixel_height } elseif ($desktop) { $desktop.pixel_height } else { $null })
     physical_width = $(if ($params) { $params.physical_width } else { $null })
     physical_height = $(if ($params) { $params.physical_height } else { $null })
     physical_unit = $(if ($params) { $params.physical_unit } else { $null })
-    rotation_degrees = $rotation
+    rotation_degrees = $(if ($displayInfo) { $displayInfo.rotation_degrees } else { $null })
   }
 }
 ) | Sort-Object model
