@@ -189,14 +189,6 @@ func Generate(options Options) (Result, error) {
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].SmartSeverity != rows[j].SmartSeverity {
-			return rows[i].SmartSeverity > rows[j].SmartSeverity
-		}
-		leftScore := cpuMarkSortValue(rows[i].CPUMark)
-		rightScore := cpuMarkSortValue(rows[j].CPUMark)
-		if leftScore != rightScore {
-			return leftScore < rightScore
-		}
 		return strings.ToUpper(rows[i].Identifier) < strings.ToUpper(rows[j].Identifier)
 	})
 
@@ -650,6 +642,22 @@ const pageTemplate = `<!DOCTYPE html>
       color: var(--muted);
       font-size: 12px;
     }
+    th[aria-sort="ascending"] .sort-button::after {
+      content: " ▲";
+    }
+    th[aria-sort="descending"] .sort-button::after {
+      content: " ▼";
+    }
+    .sort-button {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      letter-spacing: inherit;
+      text-transform: inherit;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -657,37 +665,127 @@ const pageTemplate = `<!DOCTYPE html>
     <h1>Hardware Overview</h1>
     <p class="meta">Generated {{ .GeneratedAt }} from {{ .RenderedRows }} report(s) in {{ .InputDir }}. Version {{ .Version }}.</p>
     <div class="panel">
-      <table>
+      <table id="overview-table">
         <thead>
           <tr>
-            <th>Computer</th>
-            <th>Date</th>
-            <th>CPU</th>
-            <th>CPU Mark</th>
-            <th>RAM GB</th>
-            <th>Drive GB</th>
-            <th>Worst SMART</th>
+            <th aria-sort="ascending" data-sort-type="text"><button type="button" class="sort-button">Computer</button></th>
+            <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">Date</button></th>
+            <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">CPU</button></th>
+            <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">CPU Mark</button></th>
+            <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">RAM GB</button></th>
+            <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">Drive GB</button></th>
+            <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">SMART</button></th>
           </tr>
         </thead>
         <tbody>
           {{ range .Rows }}
-          <tr>
-            <td><a href="{{ .DetailHref }}">{{ .Identifier }}</a></td>
-            <td>{{ .ReportDate }}</td>
-            <td class="cpu">
+          <tr data-row-key="{{ .Identifier }}">
+            <td data-sort-value="{{ .Identifier }}"><a href="{{ .DetailHref }}">{{ .Identifier }}</a></td>
+            <td data-sort-value="{{ .ReportDate }}">{{ .ReportDate }}</td>
+            <td class="cpu" data-sort-value="{{ .CPUModel }}">
               <div>{{ .CPUModel }}</div>
               {{ if .PassMarkURL }}<div class="subtle"><a href="{{ .PassMarkURL }}">PassMark source</a></div>{{ end }}
             </td>
-            <td class="numeric">{{ fmtInt .CPUMark }}</td>
-            <td class="numeric">{{ fmtGB .MemoryGB }}</td>
-            <td class="numeric">{{ fmtDrive .DriveGB }}</td>
-            <td><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
+            <td class="numeric" data-sort-value="{{ fmtInt .CPUMark }}">{{ fmtInt .CPUMark }}</td>
+            <td class="numeric" data-sort-value="{{ fmtGB .MemoryGB }}">{{ fmtGB .MemoryGB }}</td>
+            <td class="numeric" data-sort-value="{{ fmtDrive .DriveGB }}">{{ fmtDrive .DriveGB }}</td>
+            <td data-sort-value="{{ .SmartStatus }}"><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
           </tr>
           {{ end }}
         </tbody>
       </table>
     </div>
   </main>
+  <script>
+    (function () {
+      const table = document.getElementById('overview-table');
+      if (!table || !table.tBodies.length || !table.tHead) {
+        return;
+      }
+
+      const tbody = table.tBodies[0];
+      const headers = Array.from(table.tHead.rows[0].cells);
+
+      function rowKey(row) {
+        return (row.getAttribute('data-row-key') || '').toLocaleLowerCase();
+      }
+
+      function readValue(row, columnIndex, sortType) {
+        const cell = row.cells[columnIndex];
+        if (!cell) {
+          return '';
+        }
+
+        const rawValue = (cell.getAttribute('data-sort-value') || cell.textContent || '').trim();
+        if (sortType === 'number') {
+          if (rawValue === '') {
+            return null;
+          }
+          const numberValue = Number(rawValue.replace(/,/g, ''));
+          return Number.isFinite(numberValue) ? numberValue : null;
+        }
+
+        return rawValue.toLocaleLowerCase();
+      }
+
+      function compareRows(leftRow, rightRow, columnIndex, sortType, direction) {
+        const leftValue = readValue(leftRow, columnIndex, sortType);
+        const rightValue = readValue(rightRow, columnIndex, sortType);
+        const leftEmpty = leftValue === null || leftValue === '';
+        const rightEmpty = rightValue === null || rightValue === '';
+
+        if (leftEmpty && rightEmpty) {
+          return rowKey(leftRow).localeCompare(rowKey(rightRow));
+        }
+        if (leftEmpty) {
+          return 1;
+        }
+        if (rightEmpty) {
+          return -1;
+        }
+
+        let comparison = 0;
+        if (sortType === 'number') {
+          comparison = leftValue - rightValue;
+        } else {
+          comparison = leftValue.localeCompare(rightValue);
+        }
+
+        if (comparison === 0) {
+          comparison = rowKey(leftRow).localeCompare(rowKey(rightRow));
+        }
+
+        return direction === 'ascending' ? comparison : -comparison;
+      }
+
+      headers.forEach(function (headerCell) {
+        const button = headerCell.querySelector('.sort-button');
+        if (!button) {
+          return;
+        }
+
+        button.addEventListener('click', function () {
+          const columnIndex = headerCell.cellIndex;
+          const sortType = headerCell.getAttribute('data-sort-type') || 'text';
+          const nextDirection = headerCell.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+          const rows = Array.from(tbody.rows);
+
+          rows.sort(function (leftRow, rightRow) {
+            return compareRows(leftRow, rightRow, columnIndex, sortType, nextDirection);
+          });
+
+          rows.forEach(function (row) {
+            tbody.appendChild(row);
+          });
+
+          headers.forEach(function (cell) {
+            cell.setAttribute('aria-sort', 'none');
+          });
+          headerCell.setAttribute('aria-sort', nextDirection);
+        });
+      });
+    }());
+  </script>
 </body>
 </html>
 `
