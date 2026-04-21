@@ -50,6 +50,38 @@ type pageData struct {
 	RenderedRows int
 }
 
+type versionLink struct {
+	Label   string
+	Href    template.URL
+	Current bool
+}
+
+type detailPageData struct {
+	Identifier     string
+	Version        string
+	GeneratedAt    string
+	SourceJSONHref template.URL
+	SourceJSONName string
+	PassMarkURL    template.URL
+	PreviousHref   template.URL
+	PreviousLabel  string
+	NextHref       template.URL
+	NextLabel      string
+	Versions       []versionLink
+	Report         *report.Report
+	PrettyJSON     string
+}
+
+type sourceRecord struct {
+	Report      *report.Report
+	Identifier  string
+	SourcePath  string
+	ReportLabel string
+	CollectedAt time.Time
+	Row         row
+	DetailPath  string
+}
+
 func Generate(options Options) (Result, error) {
 	inputDir, err := filepath.Abs(options.InputDir)
 	if err != nil {
@@ -71,29 +103,39 @@ func Generate(options Options) (Result, error) {
 		return Result{}, err
 	}
 
+	detailDir := filepath.Join(filepath.Dir(outputPath), "hwreport-details")
+	if err := os.MkdirAll(detailDir, 0o755); err != nil {
+		return Result{}, fmt.Errorf("create detail directory: %w", err)
+	}
+	if err := clearDetailHTML(detailDir); err != nil {
+		return Result{}, err
+	}
+
 	entries, err := os.ReadDir(inputDir)
 	if err != nil {
 		return Result{}, fmt.Errorf("read input directory: %w", err)
 	}
 
-	var rows []row
+	var records []sourceRecord
 	totalFiles := 0
 	ctx := context.Background()
 	for _, entry := range entries {
 		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
 			continue
 		}
-		totalFiles++
 
 		sourcePath := filepath.Join(inputDir, entry.Name())
 		reportData, err := loadReport(sourcePath)
 		if err != nil {
 			continue
 		}
+		if reportData.SchemaVersion == 0 {
+			continue
+		}
+		totalFiles++
 
 		currentRow := summarizeReport(reportData)
 		currentRow.ReportLabel = entry.Name()
-		currentRow.ReportHref = fileHref(outputPath, sourcePath)
 
 		if cpuModel := strings.TrimSpace(pointerString(reportData.CPU.Model)); cpuModel != "" {
 			if lookup, err := passmarkClient.Lookup(ctx, cpuModel); err == nil {
@@ -102,11 +144,47 @@ func Generate(options Options) (Result, error) {
 			}
 		}
 
-		rows = append(rows, currentRow)
+		identifier := currentRow.Identifier
+		detailPath := filepath.Join(detailDir, detailFileName(entry.Name()))
+		currentRow.ReportHref = fileHref(outputPath, detailPath)
+
+		records = append(records, sourceRecord{
+			Report:      reportData,
+			Identifier:  identifier,
+			SourcePath:  sourcePath,
+			ReportLabel: entry.Name(),
+			CollectedAt: reportCollectedAt(reportData, sourcePath),
+			Row:         currentRow,
+			DetailPath:  detailPath,
+		})
 	}
 
-	if len(rows) == 0 {
+	if len(records) == 0 {
 		return Result{}, fmt.Errorf("no readable hwreport JSON files found in %s", inputDir)
+	}
+
+	grouped := map[string][]*sourceRecord{}
+	for idx := range records {
+		record := &records[idx]
+		grouped[record.Identifier] = append(grouped[record.Identifier], record)
+	}
+
+	var rows []row
+	for _, versions := range grouped {
+		sort.Slice(versions, func(i, j int) bool {
+			if versions[i].CollectedAt.Equal(versions[j].CollectedAt) {
+				return strings.ToUpper(versions[i].ReportLabel) < strings.ToUpper(versions[j].ReportLabel)
+			}
+			return versions[i].CollectedAt.Before(versions[j].CollectedAt)
+		})
+
+		for idx, record := range versions {
+			if err := writeDetailPage(record, versions, idx, options); err != nil {
+				return Result{}, err
+			}
+		}
+
+		rows = append(rows, versions[len(versions)-1].Row)
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
@@ -140,6 +218,59 @@ func Generate(options Options) (Result, error) {
 	}
 
 	return Result{OutputPath: outputPath}, nil
+}
+
+func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentIndex int, options Options) error {
+	prettyJSONBytes, err := json.MarshalIndent(record.Report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode report json for detail page: %w", err)
+	}
+
+	versionLinks := make([]versionLink, 0, len(versions))
+	for idx, version := range versions {
+		versionLinks = append(versionLinks, versionLink{
+			Label:   versionLabel(version),
+			Href:    fileHref(record.DetailPath, version.DetailPath),
+			Current: idx == currentIndex,
+		})
+	}
+
+	data := detailPageData{
+		Identifier:     record.Identifier,
+		Version:        options.Version,
+		GeneratedAt:    options.Now.UTC().Format(time.RFC3339),
+		SourceJSONHref: fileHref(record.DetailPath, record.SourcePath),
+		SourceJSONName: filepath.Base(record.SourcePath),
+		PassMarkURL:    record.Row.PassMarkURL,
+		Versions:       versionLinks,
+		Report:         record.Report,
+		PrettyJSON:     string(prettyJSONBytes),
+	}
+	if len(versions) > 1 {
+		previousIndex := currentIndex - 1
+		if previousIndex < 0 {
+			previousIndex = len(versions) - 1
+		}
+		nextIndex := currentIndex + 1
+		if nextIndex >= len(versions) {
+			nextIndex = 0
+		}
+
+		data.PreviousHref = fileHref(record.DetailPath, versions[previousIndex].DetailPath)
+		data.PreviousLabel = versionLabel(versions[previousIndex])
+		data.NextHref = fileHref(record.DetailPath, versions[nextIndex].DetailPath)
+		data.NextLabel = versionLabel(versions[nextIndex])
+	}
+
+	rendered, err := renderDetailPage(data)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(record.DetailPath, rendered, 0o644); err != nil {
+		return fmt.Errorf("write detail page: %w", err)
+	}
+	return nil
 }
 
 func loadReport(path string) (*report.Report, error) {
@@ -238,6 +369,70 @@ func renderPage(data pageData) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func renderDetailPage(data detailPageData) ([]byte, error) {
+	tmpl, err := template.New("detail").Funcs(template.FuncMap{
+		"fmtGB": func(value *float64) string {
+			if value == nil {
+				return ""
+			}
+			return trimFloat(*value)
+		},
+		"fmtInt": func(value *int) string {
+			if value == nil {
+				return ""
+			}
+			return fmt.Sprintf("%d", *value)
+		},
+		"fmtUint32": func(value *uint32) string {
+			if value == nil {
+				return ""
+			}
+			return fmt.Sprintf("%d", *value)
+		},
+		"fmtString": func(value *string) string {
+			return pointerString(value)
+		},
+		"fmtPixels": func(width, height *uint32) string {
+			if width == nil || height == nil {
+				return ""
+			}
+			return fmt.Sprintf("%d x %d", *width, *height)
+		},
+		"fmtPhysical": func(width, height *float64, unit *string) string {
+			if width == nil || height == nil {
+				return ""
+			}
+			unitValue := pointerString(unit)
+			if unitValue == "" {
+				return fmt.Sprintf("%s x %s", trimFloat(*width), trimFloat(*height))
+			}
+			return fmt.Sprintf("%s x %s %s", trimFloat(*width), trimFloat(*height), unitValue)
+		},
+		"smartClass": func(value string) string {
+			switch smartSeverity(value) {
+			case 3:
+				return "smart-error"
+			case 2:
+				return "smart-warning"
+			case 1:
+				return "smart-unknown"
+			default:
+				return "smart-ok"
+			}
+		},
+	}).Parse(detailTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("parse detail template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("render detail template: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
 func pointerString(value *string) string {
 	if value == nil {
 		return ""
@@ -272,6 +467,45 @@ func trimFloat(value float64) string {
 	text = strings.TrimRight(text, "0")
 	text = strings.TrimRight(text, ".")
 	return text
+}
+
+func detailFileName(sourceJSONName string) string {
+	base := strings.TrimSuffix(sourceJSONName, filepath.Ext(sourceJSONName))
+	return base + ".html"
+}
+
+func clearDetailHTML(detailDir string) error {
+	entries, err := os.ReadDir(detailDir)
+	if err != nil {
+		return fmt.Errorf("read detail directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".html" {
+			continue
+		}
+		if err := os.Remove(filepath.Join(detailDir, entry.Name())); err != nil {
+			return fmt.Errorf("remove stale detail page %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+func reportCollectedAt(reportData *report.Report, sourcePath string) time.Time {
+	if reportData != nil {
+		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(reportData.CollectedAtUTC)); err == nil {
+			return parsed
+		}
+	}
+	if info, err := os.Stat(sourcePath); err == nil {
+		return info.ModTime().UTC()
+	}
+	return time.Time{}
+}
+
+func versionLabel(record *sourceRecord) string {
+	label := record.CollectedAt.UTC().Format("2006-01-02 15:04 UTC")
+	return label + " - " + record.ReportLabel
 }
 
 func fileHref(outputPath, sourcePath string) template.URL {
@@ -445,6 +679,210 @@ const pageTemplate = `<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+  </main>
+</body>
+</html>
+`
+
+const detailTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Identifier }} - Hardware Detail</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f2ea;
+      --panel: #fffdf7;
+      --ink: #1f241f;
+      --muted: #5f665f;
+      --line: #d8d2c3;
+      --accent: #184f3d;
+      --warn: #9c6a00;
+      --bad: #8f1d1d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Aptos", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #f6f3ea 0%, #ece7dc 100%);
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      letter-spacing: -0.04em;
+    }
+    p.meta {
+      margin: 0 0 20px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .actions {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px 20px;
+      margin-bottom: 18px;
+      box-shadow: 0 14px 36px rgba(53, 48, 36, 0.08);
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid #ece6d8;
+      vertical-align: top;
+      font-size: 14px;
+    }
+    tr:last-child th, tr:last-child td {
+      border-bottom: none;
+    }
+    th {
+      width: 240px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .list-table th {
+      width: auto;
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+    }
+    .smart-badge {
+      display: inline-block;
+      min-width: 84px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .smart-ok {
+      color: var(--accent);
+      background: rgba(24, 79, 61, 0.12);
+    }
+    .smart-unknown {
+      color: var(--muted);
+      background: rgba(95, 102, 95, 0.12);
+    }
+    .smart-warning {
+      color: var(--warn);
+      background: rgba(156, 106, 0, 0.12);
+    }
+    .smart-error {
+      color: var(--bad);
+      background: rgba(143, 29, 29, 0.12);
+    }
+    pre {
+      margin: 0;
+      overflow: auto;
+      background: #f7f3e9;
+      border: 1px solid #e8e0cf;
+      border-radius: 12px;
+      padding: 16px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{{ .Identifier }}</h1>
+    <p class="meta">Generated {{ .GeneratedAt }}. Version {{ .Version }}.</p>
+    <div class="actions">
+      <a href="{{ .SourceJSONHref }}">Source JSON</a>
+      {{ if .PassMarkURL }}<a href="{{ .PassMarkURL }}">PassMark CPU source</a>{{ end }}
+      {{ if .PreviousHref }}<a href="{{ .PreviousHref }}">Previous version: {{ .PreviousLabel }}</a>{{ end }}
+      {{ if .NextHref }}<a href="{{ .NextHref }}">Next version: {{ .NextLabel }}</a>{{ end }}
+    </div>
+
+    <section class="panel">
+      <h2>Versions</h2>
+      <table class="list-table">
+        <tr><th>Snapshot</th><th>Open</th></tr>
+        {{ range .Versions }}
+        <tr>
+          <td>{{ .Label }}</td>
+          <td>{{ if .Current }}Current{{ else }}<a href="{{ .Href }}">Open</a>{{ end }}</td>
+        </tr>
+        {{ end }}
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>System</h2>
+      <table>
+        <tr><th>Hostname</th><td>{{ .Report.Hostname }}</td></tr>
+        <tr><th>Computer</th><td>{{ fmtString .Report.Computer.Manufacturer }} {{ fmtString .Report.Computer.Model }}</td></tr>
+        <tr><th>OS</th><td>{{ fmtString .Report.OS.Name }} {{ fmtString .Report.OS.Version }}</td></tr>
+        <tr><th>CPU</th><td>{{ fmtString .Report.CPU.Model }}</td></tr>
+        <tr><th>Memory</th><td>{{ fmtGB .Report.Memory.TotalInstalledGB }} GB</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Storage</h2>
+      <table class="list-table">
+        <tr><th>Model</th><th>Type</th><th>Size GB</th><th>SMART</th></tr>
+        {{ range .Report.Storage }}
+        <tr>
+          <td>{{ fmtString .Model }}</td>
+          <td>{{ fmtString .Type }}</td>
+          <td>{{ fmtGB .SizeGB }}</td>
+          <td><span class="smart-badge {{ smartClass (fmtString .SmartStatus) }}">{{ fmtString .SmartStatus }}</span></td>
+        </tr>
+        {{ end }}
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Monitors</h2>
+      <table class="list-table">
+        <tr><th>Model</th><th>Pixels</th><th>Physical Size</th><th>Rotation</th></tr>
+        {{ range .Report.Monitors }}
+        <tr>
+          <td>{{ fmtString .Manufacturer }} {{ fmtString .Model }}</td>
+          <td>{{ fmtPixels .PixelWidth .PixelHeight }}</td>
+          <td>{{ fmtPhysical .PhysicalWidth .PhysicalHeight .PhysicalUnit }}</td>
+          <td>{{ fmtInt .RotationDegrees }}</td>
+        </tr>
+        {{ end }}
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Raw JSON</h2>
+      <pre>{{ .PrettyJSON }}</pre>
+    </section>
   </main>
 </body>
 </html>

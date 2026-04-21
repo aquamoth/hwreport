@@ -68,7 +68,7 @@ Write the HTML overview to a specific file:
 .\hwoverview.exe --in D:\hwreport --out D:\hwreport\overview.html
 ```
 
-The overview is written as HTML so it can include clickable links back to the source JSON files.
+The overview is written as HTML.
 
 Each row includes:
 
@@ -78,7 +78,15 @@ Each row includes:
 - total installed memory
 - total drive capacity
 - worst drive health status
-- link to the source JSON file
+- link to a generated detail page
+
+If multiple report JSON files exist for the same computer, `hwoverview` shows only the most recent version in the main overview table.
+
+Each generated detail page includes:
+
+- a link to the source JSON
+- previous/next navigation that loops across all versions of the same computer
+- a version list so you can jump between snapshots easily
 
 If `--out` is omitted, the tool writes a JSON file in the current directory using this pattern:
 
