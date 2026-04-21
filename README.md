@@ -13,6 +13,7 @@ The binary is written in Go. The executable can be copied to removable media and
 
 - Computer manufacturer and model
 - Computer first-use date when Windows exposes one
+- Currently logged-in console user, when one is present
 - OS name, version, and first install date
 - CPU manufacturer and model
 - Memory manufacturer, model, type, installed capacity, free memory, populated slots, and empty slot count
@@ -73,6 +74,7 @@ The overview is written as HTML.
 Each row includes:
 
 - computer identifier
+- logged-in user
 - report date
 - CPU model
 - PassMark CPU Mark

@@ -32,6 +32,7 @@ type row struct {
 	Identifier    string
 	DetailHref    template.URL
 	ReportDate    string
+	User          string
 	CPUModel      string
 	CPUMark       *int
 	MemoryGB      *float64
@@ -309,6 +310,7 @@ func summarizeReport(data *report.Report) row {
 
 	return row{
 		Identifier:    identifier,
+		User:          strings.TrimSpace(pointerString(data.LoggedInUser)),
 		CPUModel:      strings.TrimSpace(pointerString(data.CPU.Model)),
 		MemoryGB:      data.Memory.TotalInstalledGB,
 		DriveGB:       totalDriveGB,
@@ -669,6 +671,7 @@ const pageTemplate = `<!DOCTYPE html>
         <thead>
           <tr>
             <th aria-sort="ascending" data-sort-type="text"><button type="button" class="sort-button">Computer</button></th>
+            <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">User</button></th>
             <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">Date</button></th>
             <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">CPU</button></th>
             <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">CPU Mark</button></th>
@@ -681,6 +684,7 @@ const pageTemplate = `<!DOCTYPE html>
           {{ range .Rows }}
           <tr data-row-key="{{ .Identifier }}">
             <td data-sort-value="{{ .Identifier }}"><a href="{{ .DetailHref }}">{{ .Identifier }}</a></td>
+            <td data-sort-value="{{ .User }}">{{ .User }}</td>
             <td data-sort-value="{{ .ReportDate }}">{{ .ReportDate }}</td>
             <td class="cpu" data-sort-value="{{ .CPUModel }}">
               <div>{{ .CPUModel }}</div>
@@ -948,6 +952,7 @@ const detailTemplate = `<!DOCTYPE html>
       <h2>System</h2>
       <table>
         <tr><th>Hostname</th><td>{{ .Report.Hostname }}</td></tr>
+        <tr><th>Logged-in user</th><td>{{ fmtString .Report.LoggedInUser }}</td></tr>
         <tr><th>Computer</th><td>{{ fmtString .Report.Computer.Manufacturer }} {{ fmtString .Report.Computer.Model }}</td></tr>
         <tr><th>OS</th><td>{{ fmtString .Report.OS.Name }} {{ fmtString .Report.OS.Version }}</td></tr>
         <tr><th>CPU</th><td>{{ fmtString .Report.CPU.Model }}</td></tr>

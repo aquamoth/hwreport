@@ -4,6 +4,7 @@ type Report struct {
 	SchemaVersion  int       `json:"schema_version"`
 	CollectedAtUTC string    `json:"collected_at_utc"`
 	Hostname       string    `json:"hostname"`
+	LoggedInUser   *string   `json:"logged_in_user"`
 	Computer       Computer  `json:"computer"`
 	OS             OS        `json:"os"`
 	CPU            CPU       `json:"cpu"`

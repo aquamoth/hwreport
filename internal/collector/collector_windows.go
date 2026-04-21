@@ -243,6 +243,57 @@ function Get-SmartStatus($physicalDisk, $predictFailure) {
   return $null
 }
 
+function Test-RunningUnderWinRM {
+  try {
+    $current = [int]$PID
+    for ($i = 0; $i -lt 8; $i++) {
+      $proc = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $current) -ErrorAction SilentlyContinue
+      if (-not $proc) { return $false }
+      if ($proc.Name -ieq 'wsmprovhost.exe') { return $true }
+      $parentId = [int]$proc.ParentProcessId
+      if ($parentId -le 0 -or $parentId -eq $current) { return $false }
+      $current = $parentId
+    }
+  } catch { }
+  return $false
+}
+
+function Get-ExplorerOwner {
+  try {
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $owners = New-Object System.Collections.Generic.List[string]
+    $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue)
+    foreach ($proc in $explorers) {
+      $result = Invoke-CimMethod -InputObject $proc -MethodName GetOwner -ErrorAction SilentlyContinue
+      if ($result -and [int]$result.ReturnValue -eq 0 -and $result.User) {
+        $label = if ($result.Domain) { "{0}\{1}" -f $result.Domain, $result.User } else { [string]$result.User }
+        if ($seen.Add($label)) { [void]$owners.Add($label) }
+      }
+    }
+    if ($owners.Count -ge 1) { return $owners[0] }
+  } catch { }
+  return $null
+}
+
+function Get-LoggedInUser($computerSystem) {
+  $name = Normalize-Text $computerSystem.UserName
+  if ($name) { return $name }
+
+  $owner = Get-ExplorerOwner
+  if ($owner) { return $owner }
+
+  if (-not (Test-RunningUnderWinRM)) {
+    $envUser = Normalize-Text $env:USERNAME
+    if ($envUser) {
+      $domain = Normalize-Text $env:USERDOMAIN
+      if ($domain) { return "{0}\{1}" -f $domain, $envUser }
+      return $envUser
+    }
+  }
+
+  return $null
+}
+
 function Convert-ToRotationDegrees($value) {
   switch ([int]$value) {
     0 { return 0 }
@@ -608,6 +659,7 @@ if (-not $computerFirstUse -and $computerSystemProduct) {
 }
 
 $report = [ordered]@{
+  logged_in_user = Get-LoggedInUser $computerSystem
   computer = [ordered]@{
     manufacturer = Normalize-Manufacturer $computerSystem.Manufacturer
     model = Normalize-Text $computerSystem.Model
