@@ -73,12 +73,13 @@ The overview is written as HTML.
 Each row includes:
 
 - computer identifier
+- report date
 - CPU model
 - PassMark CPU Mark
 - total installed memory
 - total drive capacity
 - worst drive health status
-- link to a generated detail page
+- link from the computer name to a generated detail page
 
 If multiple report JSON files exist for the same computer, `hwoverview` shows only the most recent version in the main overview table.
 

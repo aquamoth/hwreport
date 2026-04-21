@@ -30,14 +30,14 @@ type Result struct {
 
 type row struct {
 	Identifier    string
+	DetailHref    template.URL
+	ReportDate    string
 	CPUModel      string
 	CPUMark       *int
 	MemoryGB      *float64
 	DriveGB       float64
 	SmartStatus   string
 	SmartSeverity int
-	ReportHref    template.URL
-	ReportLabel   string
 	PassMarkURL   template.URL
 }
 
@@ -135,7 +135,6 @@ func Generate(options Options) (Result, error) {
 		totalFiles++
 
 		currentRow := summarizeReport(reportData)
-		currentRow.ReportLabel = entry.Name()
 
 		if cpuModel := strings.TrimSpace(pointerString(reportData.CPU.Model)); cpuModel != "" {
 			if lookup, err := passmarkClient.Lookup(ctx, cpuModel); err == nil {
@@ -145,15 +144,17 @@ func Generate(options Options) (Result, error) {
 		}
 
 		identifier := currentRow.Identifier
+		collectedAt := reportCollectedAt(reportData, sourcePath)
 		detailPath := filepath.Join(detailDir, detailFileName(entry.Name()))
-		currentRow.ReportHref = fileHref(outputPath, detailPath)
+		currentRow.DetailHref = fileHref(outputPath, detailPath)
+		currentRow.ReportDate = formatReportDate(collectedAt)
 
 		records = append(records, sourceRecord{
 			Report:      reportData,
 			Identifier:  identifier,
 			SourcePath:  sourcePath,
 			ReportLabel: entry.Name(),
-			CollectedAt: reportCollectedAt(reportData, sourcePath),
+			CollectedAt: collectedAt,
 			Row:         currentRow,
 			DetailPath:  detailPath,
 		})
@@ -504,8 +505,15 @@ func reportCollectedAt(reportData *report.Report, sourcePath string) time.Time {
 }
 
 func versionLabel(record *sourceRecord) string {
-	label := record.CollectedAt.UTC().Format("2006-01-02 15:04 UTC")
+	label := formatReportDate(record.CollectedAt)
 	return label + " - " + record.ReportLabel
+}
+
+func formatReportDate(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format("2006-01-02 15:04 UTC")
 }
 
 func fileHref(outputPath, sourcePath string) template.URL {
@@ -653,18 +661,19 @@ const pageTemplate = `<!DOCTYPE html>
         <thead>
           <tr>
             <th>Computer</th>
+            <th>Date</th>
             <th>CPU</th>
             <th>CPU Mark</th>
             <th>RAM GB</th>
             <th>Drive GB</th>
             <th>Worst SMART</th>
-            <th>Report</th>
           </tr>
         </thead>
         <tbody>
           {{ range .Rows }}
           <tr>
-            <td>{{ .Identifier }}</td>
+            <td><a href="{{ .DetailHref }}">{{ .Identifier }}</a></td>
+            <td>{{ .ReportDate }}</td>
             <td class="cpu">
               <div>{{ .CPUModel }}</div>
               {{ if .PassMarkURL }}<div class="subtle"><a href="{{ .PassMarkURL }}">PassMark source</a></div>{{ end }}
@@ -673,7 +682,6 @@ const pageTemplate = `<!DOCTYPE html>
             <td class="numeric">{{ fmtGB .MemoryGB }}</td>
             <td class="numeric">{{ fmtDrive .DriveGB }}</td>
             <td><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
-            <td><a href="{{ .ReportHref }}">{{ .ReportLabel }}</a></td>
           </tr>
           {{ end }}
         </tbody>

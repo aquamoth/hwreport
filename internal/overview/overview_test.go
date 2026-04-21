@@ -60,8 +60,20 @@ func TestGenerateUsesNewestSnapshotAndLoopsDetailNavigation(t *testing.T) {
 	if !strings.Contains(overviewHTML, "Generated 2026-04-21T12:00:00Z from 2 report(s)") {
 		t.Fatalf("overview should render two latest rows, got:\n%s", overviewHTML)
 	}
-	if !strings.Contains(overviewHTML, "alpha-2026-04-21.html") {
-		t.Fatalf("overview should link newest alpha detail page, got:\n%s", overviewHTML)
+	if !strings.Contains(overviewHTML, "<th>Date</th>") {
+		t.Fatalf("overview should include a date column, got:\n%s", overviewHTML)
+	}
+	if strings.Contains(overviewHTML, "<th>Report</th>") {
+		t.Fatalf("overview should not include a report filename column, got:\n%s", overviewHTML)
+	}
+	if !strings.Contains(overviewHTML, "<a href=\"hwreport-details/alpha-2026-04-21.html\">alpha</a>") {
+		t.Fatalf("overview should link the computer name to newest alpha detail page, got:\n%s", overviewHTML)
+	}
+	if !strings.Contains(overviewHTML, "<td>2026-04-21 08:00 UTC</td>") {
+		t.Fatalf("overview should show newest alpha report date, got:\n%s", overviewHTML)
+	}
+	if strings.Contains(overviewHTML, "alpha-2026-04-21.json</a></td>") {
+		t.Fatalf("overview should not show the report filename as its own column, got:\n%s", overviewHTML)
 	}
 	if strings.Contains(overviewHTML, "alpha-2026-04-20.html") {
 		t.Fatalf("overview should not link older alpha snapshot, got:\n%s", overviewHTML)
