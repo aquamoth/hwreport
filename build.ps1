@@ -3,7 +3,8 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repoRoot
 
-$output = Join-Path $repoRoot "hwreport.exe"
+$hwreportOutput = Join-Path $repoRoot "hwreport.exe"
+$hwoverviewOutput = Join-Path $repoRoot "hwoverview.exe"
 $env:GOCACHE = Join-Path $repoRoot ".gocache"
 $versionFile = Join-Path $repoRoot "VERSION"
 
@@ -50,6 +51,8 @@ $ldflags = @(
     "-X", "specreport/internal/version.commitHash=$commit"
 )
 
-go build -trimpath -ldflags ($ldflags -join " ") -o $output ./cmd/hwreport
+go build -trimpath -ldflags ($ldflags -join " ") -o $hwreportOutput ./cmd/hwreport
+go build -trimpath -ldflags ($ldflags -join " ") -o $hwoverviewOutput ./cmd/hwoverview
 
-Write-Output "Built $output"
+Write-Output "Built $hwreportOutput"
+Write-Output "Built $hwoverviewOutput"

@@ -1,10 +1,15 @@
 # hwreport
 
-`hwreport` is a standalone Windows hardware inventory tool intended to run directly from a USB stick. It collects a minimal JSON report about the current machine without requiring installation or user interaction.
+`hwreport` is a small toolkit for collecting and summarizing Windows hardware inventory data.
+
+It currently contains two standalone Windows executables:
+
+- `hwreport.exe` collects a JSON report from a single computer
+- `hwoverview.exe` aggregates many report JSON files into an HTML overview table
 
 The binary is written in Go. The executable can be copied to removable media and run on Windows 11 computers to produce per-machine report files for later aggregation.
 
-## What It Collects
+## hwreport: What It Collects
 
 - Computer manufacturer and model
 - Computer first-use date when Windows exposes one
@@ -15,7 +20,7 @@ The binary is written in Go. The executable can be copied to removable media and
 - GPU manufacturer and model
 - Active monitors, pixel and physical size when available, and current rotation
 
-## Usage
+## hwreport: Usage
 
 Run with the default output filename:
 
@@ -41,7 +46,39 @@ Print version information:
 .\hwreport.exe --version
 ```
 
-## Output Files
+## hwreport: Output Files
+
+## hwoverview: Usage
+
+Aggregate all report JSON files in the current directory:
+
+```powershell
+.\hwoverview.exe
+```
+
+Aggregate reports from a specific directory:
+
+```powershell
+.\hwoverview.exe --in D:\hwreport
+```
+
+Write the HTML overview to a specific file:
+
+```powershell
+.\hwoverview.exe --in D:\hwreport --out D:\hwreport\overview.html
+```
+
+The overview is written as HTML so it can include clickable links back to the source JSON files.
+
+Each row includes:
+
+- computer identifier
+- CPU model
+- PassMark CPU Mark
+- total installed memory
+- total drive capacity
+- worst drive health status
+- link to the source JSON file
 
 If `--out` is omitted, the tool writes a JSON file in the current directory using this pattern:
 
@@ -69,7 +106,7 @@ Build the latest checked-out version with the provided script:
 pwsh -File .\build.ps1
 ```
 
-The script builds `hwreport.exe` in the repository root and embeds:
+The script builds both `hwreport.exe` and `hwoverview.exe` in the repository root and embeds:
 
 - the semantic version derived from `VERSION` plus git commit height
 - the current commit hash
@@ -99,3 +136,4 @@ This is intentionally similar to version-height schemes such as NerdBank.GitVers
 - Some hardware details depend on what Windows exposes through WMI, CIM, and display APIs.
 - Monitor rotation is reported using standard Windows values: `0`, `90`, `180`, or `270`.
 - Disk manufacture dates and empty memory slot locations are often unavailable on typical systems.
+- `hwoverview` uses PassMark's CPU lookup pages to resolve CPU Mark values and caches those lookups locally in the input directory.
