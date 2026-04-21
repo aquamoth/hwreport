@@ -2,3 +2,6 @@
 hwreport.exe
 hwoverview.exe
 sample-report*.json
+reports/
+bash.exe.stackdump
+.claude/

@@ -1,0 +1,8 @@
+[autorun]
+label=Hardware Report
+icon=hwreport.exe,0
+action=Run Hardware Report
+open=START HERE.cmd
+shell\run=&Run Hardware Report
+shell\run\command=START HERE.cmd
+shell=run
