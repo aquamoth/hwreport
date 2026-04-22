@@ -30,7 +30,7 @@ func Collect() (*report.Report, error) {
 		return nil, fmt.Errorf("decode collector output: %w", err)
 	}
 
-	out.SchemaVersion = 1
+	out.SchemaVersion = 2
 	out.CollectedAtUTC = time.Now().UTC().Format(time.RFC3339)
 	out.Hostname = hostname
 	return &out, nil
@@ -176,6 +176,15 @@ function Decode-Uint16String($values) {
 function Get-UniqueValue($values) {
   $unique = @($values | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
   if ($unique.Count -eq 1) { return $unique[0] }
+  return $null
+}
+
+function Get-FirstValue($values) {
+  foreach ($value in $values) {
+    if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+      return $value
+    }
+  }
   return $null
 }
 
@@ -540,6 +549,8 @@ $memoryModules = foreach ($item in $memoryModulesRaw) {
     manufacturer = Normalize-Text $item.Manufacturer
     part_number = Normalize-Text $item.PartNumber
     type = $memoryType
+    configured_speed_mhz = Convert-ToIntOrNull $item.ConfiguredClockSpeed
+    rated_speed_mhz = Convert-ToIntOrNull $item.Speed
     size_gb = Convert-BytesToGB $item.Capacity
     slot = Get-SlotLabel $item.DeviceLocator $item.BankLabel
   }
@@ -677,7 +688,9 @@ $report = [ordered]@{
   memory = [ordered]@{
     manufacturer = Get-UniqueValue ($memoryModules | ForEach-Object { $_.manufacturer })
     model = Get-UniqueValue ($memoryModules | ForEach-Object { $_.part_number })
-    type = Get-UniqueValue ($memoryModules | ForEach-Object { $_.type })
+    type = Get-FirstValue ($memoryModules | ForEach-Object { $_.type })
+    configured_speed_mhz = Get-FirstValue ($memoryModules | ForEach-Object { $_.configured_speed_mhz })
+    rated_speed_mhz = Get-FirstValue ($memoryModules | ForEach-Object { $_.rated_speed_mhz })
     total_installed_gb = Convert-BytesToGB $memoryTotalBytes
     total_slots = Convert-ToIntOrNull $memoryTotalSlots
     empty_slots = Convert-ToIntOrNull $memoryEmptySlots

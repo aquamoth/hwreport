@@ -35,6 +35,8 @@ type Memory struct {
 	Manufacturer       *string        `json:"manufacturer"`
 	Model              *string        `json:"model"`
 	Type               *string        `json:"type"`
+	ConfiguredSpeedMHz *int           `json:"configured_speed_mhz"`
+	RatedSpeedMHz      *int           `json:"rated_speed_mhz"`
 	TotalInstalledGB   *float64       `json:"total_installed_gb"`
 	TotalSlots         *int           `json:"total_slots"`
 	EmptySlots         *int           `json:"empty_slots"`
@@ -44,20 +46,33 @@ type Memory struct {
 }
 
 type MemoryModule struct {
-	Manufacturer *string  `json:"manufacturer"`
-	PartNumber   *string  `json:"part_number"`
-	Type         *string  `json:"type"`
-	SizeGB       *float64 `json:"size_gb"`
-	Slot         *string  `json:"slot"`
+	Manufacturer       *string  `json:"manufacturer"`
+	PartNumber         *string  `json:"part_number"`
+	Type               *string  `json:"type"`
+	ConfiguredSpeedMHz *int     `json:"configured_speed_mhz"`
+	RatedSpeedMHz      *int     `json:"rated_speed_mhz"`
+	SizeGB             *float64 `json:"size_gb"`
+	Slot               *string  `json:"slot"`
 }
 
 type Drive struct {
-	Manufacturer    *string  `json:"manufacturer"`
-	Model           *string  `json:"model"`
-	Type            *string  `json:"type"`
-	SizeGB          *float64 `json:"size_gb"`
-	ManufactureDate *string  `json:"manufacture_date"`
-	SmartStatus     *string  `json:"smart_status"`
+	Manufacturer    *string         `json:"manufacturer"`
+	Model           *string         `json:"model"`
+	Type            *string         `json:"type"`
+	SizeGB          *float64        `json:"size_gb"`
+	ManufactureDate *string         `json:"manufacture_date"`
+	SmartStatus     *string         `json:"smart_status"`
+	Benchmark       *DriveBenchmark `json:"benchmark,omitempty"`
+}
+
+type DriveBenchmark struct {
+	CanonicalName       *string  `json:"canonical_name"`
+	DriveMark           *int     `json:"drive_mark"`
+	SequentialReadMBps  *float64 `json:"sequential_read_mbps"`
+	SequentialWriteMBps *float64 `json:"sequential_write_mbps"`
+	RandomReadWriteMBps *float64 `json:"random_read_write_mbps"`
+	IOPS4KQD1MBps       *float64 `json:"iops_4kqd1_mbps"`
+	LookupURL           *string  `json:"lookup_url"`
 }
 
 type GPU struct {

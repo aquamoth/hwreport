@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ type row struct {
 	User          string
 	CPUModel      string
 	CPUMark       *int
+	MemoryType    string
 	MemoryGB      *float64
 	DriveGB       float64
 	SmartStatus   string
@@ -70,7 +72,20 @@ type detailPageData struct {
 	NextLabel      string
 	Versions       []versionLink
 	Report         *report.Report
+	Storage        []detailDrive
 	PrettyJSON     string
+}
+
+type detailDrive struct {
+	Model               string
+	Type                string
+	SizeGB              *float64
+	SmartStatus         string
+	DriveMark           *int
+	SequentialReadMBps  *float64
+	SequentialWriteMBps *float64
+	IOPS4KQD1MBps       *float64
+	LookupURL           string
 }
 
 type sourceRecord struct {
@@ -100,6 +115,11 @@ func Generate(options Options) (Result, error) {
 
 	cachePath := filepath.Join(inputDir, ".hwoverview-passmark-cache.json")
 	passmarkClient, err := passmark.NewClient(cachePath)
+	if err != nil {
+		return Result{}, err
+	}
+	driveCachePath := filepath.Join(inputDir, ".hwoverview-drive-cache.json")
+	driveClient, err := passmark.NewDriveClient(driveCachePath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -143,7 +163,6 @@ func Generate(options Options) (Result, error) {
 				currentRow.PassMarkURL = safeURL(lookup.LookupURL)
 			}
 		}
-
 		identifier := currentRow.Identifier
 		collectedAt := reportCollectedAt(reportData, sourcePath)
 		detailPath := filepath.Join(detailDir, detailFileName(entry.Name()))
@@ -181,7 +200,7 @@ func Generate(options Options) (Result, error) {
 		})
 
 		for idx, record := range versions {
-			if err := writeDetailPage(record, versions, idx, options); err != nil {
+			if err := writeDetailPage(record, versions, idx, options, driveClient, ctx); err != nil {
 				return Result{}, err
 			}
 		}
@@ -214,7 +233,7 @@ func Generate(options Options) (Result, error) {
 	return Result{OutputPath: outputPath}, nil
 }
 
-func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentIndex int, options Options) error {
+func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentIndex int, options Options, driveClient *passmark.DriveClient, ctx context.Context) error {
 	prettyJSONBytes, err := json.MarshalIndent(record.Report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode report json for detail page: %w", err)
@@ -238,6 +257,7 @@ func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentInde
 		PassMarkURL:    record.Row.PassMarkURL,
 		Versions:       versionLinks,
 		Report:         record.Report,
+		Storage:        buildDetailDrives(record.Report, driveClient, ctx),
 		PrettyJSON:     string(prettyJSONBytes),
 	}
 	if len(versions) > 1 {
@@ -312,11 +332,52 @@ func summarizeReport(data *report.Report) row {
 		Identifier:    identifier,
 		User:          strings.TrimSpace(pointerString(data.LoggedInUser)),
 		CPUModel:      strings.TrimSpace(pointerString(data.CPU.Model)),
+		MemoryType:    strings.TrimSpace(pointerString(data.Memory.Type)),
 		MemoryGB:      data.Memory.TotalInstalledGB,
 		DriveGB:       totalDriveGB,
 		SmartStatus:   worstStatus,
 		SmartSeverity: worstSeverity,
 	}
+}
+
+func buildDetailDrives(data *report.Report, driveClient *passmark.DriveClient, ctx context.Context) []detailDrive {
+	drives := make([]detailDrive, 0, len(data.Storage))
+	for _, drive := range data.Storage {
+		item := detailDrive{
+			Model:       strings.TrimSpace(pointerString(drive.Model)),
+			Type:        strings.TrimSpace(pointerString(drive.Type)),
+			SizeGB:      drive.SizeGB,
+			SmartStatus: strings.TrimSpace(pointerString(drive.SmartStatus)),
+		}
+
+		if drive.Benchmark != nil {
+			if value := strings.TrimSpace(pointerString(drive.Benchmark.CanonicalName)); value != "" {
+				item.Model = value
+			}
+			item.DriveMark = drive.Benchmark.DriveMark
+			item.SequentialReadMBps = drive.Benchmark.SequentialReadMBps
+			item.SequentialWriteMBps = drive.Benchmark.SequentialWriteMBps
+			item.IOPS4KQD1MBps = drive.Benchmark.IOPS4KQD1MBps
+			item.LookupURL = strings.TrimSpace(pointerString(drive.Benchmark.LookupURL))
+		}
+
+		driveModel := item.Model
+		if item.DriveMark == nil && driveClient != nil && driveModel != "" {
+			if lookup, err := driveClient.Lookup(ctx, driveModel); err == nil {
+				if value := strings.TrimSpace(lookup.CanonicalName); value != "" {
+					item.Model = value
+				}
+				item.DriveMark = lookup.DriveMark
+				item.SequentialReadMBps = lookup.SequentialReadMBps
+				item.SequentialWriteMBps = lookup.SequentialWriteMBps
+				item.IOPS4KQD1MBps = lookup.IOPS4KQD1MBps
+				item.LookupURL = strings.TrimSpace(lookup.LookupURL)
+			}
+		}
+
+		drives = append(drives, item)
+	}
+	return drives
 }
 
 func renderPage(data pageData) ([]byte, error) {
@@ -338,6 +399,9 @@ func renderPage(data pageData) ([]byte, error) {
 				return ""
 			}
 			return fmt.Sprintf("%d", *value)
+		},
+		"fmtString": func(value string) string {
+			return strings.TrimSpace(value)
 		},
 		"smartClass": func(value string) string {
 			switch smartSeverity(value) {
@@ -387,6 +451,27 @@ func renderDetailPage(data detailPageData) ([]byte, error) {
 		"fmtString": func(value *string) string {
 			return pointerString(value)
 		},
+		"fmtMaybeInt": func(value *int, unit string) string {
+			if value == nil {
+				return ""
+			}
+			if strings.TrimSpace(unit) == "" {
+				return fmt.Sprintf("%d", *value)
+			}
+			return fmt.Sprintf("%d %s", *value, unit)
+		},
+		"fmtMaybeFloat": func(value *float64, unit string) string {
+			if value == nil {
+				return ""
+			}
+			if strings.TrimSpace(unit) == "" {
+				return trimFloat(*value)
+			}
+			return fmt.Sprintf("%s %s", trimFloat(*value), unit)
+		},
+		"fmtMemorySummary": func(memory report.Memory) string {
+			return memorySummary(memory)
+		},
 		"fmtPixels": func(width, height *uint32) string {
 			if width == nil || height == nil {
 				return ""
@@ -402,6 +487,40 @@ func renderDetailPage(data detailPageData) ([]byte, error) {
 				return fmt.Sprintf("%s x %s", trimFloat(*width), trimFloat(*height))
 			}
 			return fmt.Sprintf("%s x %s %s", trimFloat(*width), trimFloat(*height), unitValue)
+		},
+		"fmtDiagonalInches": func(width, height *float64, unit *string) string {
+			if width == nil || height == nil {
+				return ""
+			}
+			unitValue := strings.ToLower(strings.TrimSpace(pointerString(unit)))
+			diagonal := math.Sqrt((*width * *width) + (*height * *height))
+			switch unitValue {
+			case "cm":
+				diagonal = diagonal / 2.54
+			case "in", "inch", "inches":
+			default:
+				return ""
+			}
+			return fmt.Sprintf("%.0f\"", diagonal)
+		},
+		"fmtAspectRatio": func(pixelWidth, pixelHeight *uint32, physicalWidth, physicalHeight *float64) string {
+			if pixelWidth != nil && pixelHeight != nil && *pixelWidth > 0 && *pixelHeight > 0 {
+				left := int(*pixelWidth)
+				right := int(*pixelHeight)
+				divisor := gcd(left, right)
+				if divisor > 0 {
+					return fmt.Sprintf("%d:%d", left/divisor, right/divisor)
+				}
+			}
+			if physicalWidth != nil && physicalHeight != nil && *physicalWidth > 0 && *physicalHeight > 0 {
+				left := int(math.Round(*physicalWidth))
+				right := int(math.Round(*physicalHeight))
+				divisor := gcd(left, right)
+				if divisor > 0 {
+					return fmt.Sprintf("%d:%d", left/divisor, right/divisor)
+				}
+			}
+			return ""
 		},
 		"smartClass": func(value string) string {
 			switch smartSeverity(value) {
@@ -462,6 +581,53 @@ func trimFloat(value float64) string {
 	text = strings.TrimRight(text, "0")
 	text = strings.TrimRight(text, ".")
 	return text
+}
+
+func memorySummary(memory report.Memory) string {
+	memoryType := strings.TrimSpace(pointerString(memory.Type))
+	if len(memory.Modules) > 1 {
+		var moduleSize *float64
+		uniform := true
+		count := 0
+		for _, module := range memory.Modules {
+			if module.SizeGB == nil {
+				uniform = false
+				break
+			}
+			if moduleSize == nil {
+				moduleSize = module.SizeGB
+			} else if *moduleSize != *module.SizeGB {
+				uniform = false
+				break
+			}
+			count++
+		}
+		if uniform && moduleSize != nil && count > 0 {
+			summary := fmt.Sprintf("%d x %s GB", count, trimFloat(*moduleSize))
+			if memoryType != "" {
+				summary += " " + memoryType
+			}
+			return summary
+		}
+	}
+
+	if memory.TotalInstalledGB != nil {
+		summary := fmt.Sprintf("%s GB", trimFloat(*memory.TotalInstalledGB))
+		if memoryType != "" {
+			summary += " " + memoryType
+		}
+		return summary
+	}
+	return memoryType
+}
+
+func gcd(left, right int) int {
+	left = int(math.Abs(float64(left)))
+	right = int(math.Abs(float64(right)))
+	for right != 0 {
+		left, right = right, left%right
+	}
+	return left
 }
 
 func detailFileName(sourceJSONName string) string {
@@ -675,6 +841,7 @@ const pageTemplate = `<!DOCTYPE html>
             <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">Date</button></th>
             <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">CPU</button></th>
             <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">CPU Mark</button></th>
+            <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">RAM Type</button></th>
             <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">RAM GB</button></th>
             <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">Drive GB</button></th>
             <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">SMART</button></th>
@@ -691,6 +858,7 @@ const pageTemplate = `<!DOCTYPE html>
               {{ if .PassMarkURL }}<div class="subtle"><a href="{{ .PassMarkURL }}">PassMark source</a></div>{{ end }}
             </td>
             <td class="numeric" data-sort-value="{{ fmtInt .CPUMark }}">{{ fmtInt .CPUMark }}</td>
+            <td data-sort-value="{{ fmtString .MemoryType }}">{{ fmtString .MemoryType }}</td>
             <td class="numeric" data-sort-value="{{ fmtGB .MemoryGB }}">{{ fmtGB .MemoryGB }}</td>
             <td class="numeric" data-sort-value="{{ fmtDrive .DriveGB }}">{{ fmtDrive .DriveGB }}</td>
             <td data-sort-value="{{ .SmartStatus }}"><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
@@ -956,20 +1124,38 @@ const detailTemplate = `<!DOCTYPE html>
         <tr><th>Computer</th><td>{{ fmtString .Report.Computer.Manufacturer }} {{ fmtString .Report.Computer.Model }}</td></tr>
         <tr><th>OS</th><td>{{ fmtString .Report.OS.Name }} {{ fmtString .Report.OS.Version }}</td></tr>
         <tr><th>CPU</th><td>{{ fmtString .Report.CPU.Model }}</td></tr>
-        <tr><th>Memory</th><td>{{ fmtGB .Report.Memory.TotalInstalledGB }} GB</td></tr>
+        <tr><th>Memory</th><td>{{ fmtMemorySummary .Report.Memory }}</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Memory</h2>
+      <table>
+        <tr><th>Total Installed</th><td>{{ fmtGB .Report.Memory.TotalInstalledGB }} GB</td></tr>
+        <tr><th>Type</th><td>{{ fmtString .Report.Memory.Type }}</td></tr>
+        <tr><th>Configured Speed</th><td>{{ fmtMaybeInt .Report.Memory.ConfiguredSpeedMHz "MHz" }}</td></tr>
+        <tr><th>Rated Speed</th><td>{{ fmtMaybeInt .Report.Memory.RatedSpeedMHz "MHz" }}</td></tr>
+        <tr><th>Slots</th><td>{{ fmtInt .Report.Memory.TotalSlots }}</td></tr>
+        <tr><th>Empty Slots</th><td>{{ fmtInt .Report.Memory.EmptySlots }}</td></tr>
+        <tr><th>Free Memory</th><td>{{ fmtGB .Report.Memory.FreeGB }} GB</td></tr>
       </table>
     </section>
 
     <section class="panel">
       <h2>Storage</h2>
       <table class="list-table">
-        <tr><th>Model</th><th>Type</th><th>Size GB</th><th>SMART</th></tr>
-        {{ range .Report.Storage }}
+        <tr><th>Model</th><th>Type</th><th>Size GB</th><th>SMART</th><th>Drive Mark</th><th>Read</th><th>Write</th><th>IOPS 4KQD1</th><th>Source</th></tr>
+        {{ range .Storage }}
         <tr>
-          <td>{{ fmtString .Model }}</td>
-          <td>{{ fmtString .Type }}</td>
+          <td>{{ .Model }}</td>
+          <td>{{ .Type }}</td>
           <td>{{ fmtGB .SizeGB }}</td>
-          <td><span class="smart-badge {{ smartClass (fmtString .SmartStatus) }}">{{ fmtString .SmartStatus }}</span></td>
+          <td><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
+          <td>{{ fmtInt .DriveMark }}</td>
+          <td>{{ fmtMaybeFloat .SequentialReadMBps "MB/s" }}</td>
+          <td>{{ fmtMaybeFloat .SequentialWriteMBps "MB/s" }}</td>
+          <td>{{ fmtMaybeFloat .IOPS4KQD1MBps "MB/s" }}</td>
+          <td>{{ if .LookupURL }}<a href="{{ .LookupURL }}">Hard Drive Benchmark</a>{{ end }}</td>
         </tr>
         {{ end }}
       </table>
@@ -978,12 +1164,14 @@ const detailTemplate = `<!DOCTYPE html>
     <section class="panel">
       <h2>Monitors</h2>
       <table class="list-table">
-        <tr><th>Model</th><th>Pixels</th><th>Physical Size</th><th>Rotation</th></tr>
+        <tr><th>Model</th><th>Pixels</th><th>Physical Size</th><th>Diagonal</th><th>Aspect Ratio</th><th>Rotation</th></tr>
         {{ range .Report.Monitors }}
         <tr>
           <td>{{ fmtString .Manufacturer }} {{ fmtString .Model }}</td>
           <td>{{ fmtPixels .PixelWidth .PixelHeight }}</td>
           <td>{{ fmtPhysical .PhysicalWidth .PhysicalHeight .PhysicalUnit }}</td>
+          <td>{{ fmtDiagonalInches .PhysicalWidth .PhysicalHeight .PhysicalUnit }}</td>
+          <td>{{ fmtAspectRatio .PixelWidth .PixelHeight .PhysicalWidth .PhysicalHeight }}</td>
           <td>{{ fmtInt .RotationDegrees }}</td>
         </tr>
         {{ end }}

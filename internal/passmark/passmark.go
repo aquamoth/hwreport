@@ -35,6 +35,8 @@ type Client struct {
 	http      *http.Client
 }
 
+const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+
 func NewClient(cachePath string) (*Client, error) {
 	cache := Cache{Entries: map[string]LookupResult{}}
 	payload, err := os.ReadFile(cachePath)
@@ -95,7 +97,7 @@ func (c *Client) lookupCandidate(ctx context.Context, candidate string) (LookupR
 	if err != nil {
 		return LookupResult{}, fmt.Errorf("create passmark request: %w", err)
 	}
-	req.Header.Set("User-Agent", "hwoverview/1.0 (+https://trustfall.se)")
+	req.Header.Set("User-Agent", browserUserAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
