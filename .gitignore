@@ -1,4 +1,5 @@
 .gocache/
+.tools/
 hwreport.exe
 hwoverview.exe
 sample-report*.json
