@@ -7,7 +7,6 @@ $hwreportOutput = Join-Path $repoRoot "hwreport.exe"
 $hwoverviewOutput = Join-Path $repoRoot "hwoverview.exe"
 $env:GOCACHE = Join-Path $repoRoot ".gocache"
 $versionFile = Join-Path $repoRoot "VERSION"
-$goversioninfo = Join-Path $repoRoot ".tools\goversioninfo.exe"
 $hwreportSyso = Join-Path $repoRoot "cmd\hwreport\zz_versioninfo.syso"
 $hwoverviewSyso = Join-Path $repoRoot "cmd\hwoverview\zz_versioninfo.syso"
 $hwreportVersionJSON = Join-Path $repoRoot "cmd\hwreport\zz_versioninfo.json"
@@ -55,10 +54,6 @@ $ldflags = @(
     "-X", "specreport/internal/version.semanticVersion=$version",
     "-X", "specreport/internal/version.commitHash=$commit"
 )
-
-if (-not (Test-Path $goversioninfo)) {
-    throw "goversioninfo.exe not found: $goversioninfo"
-}
 
 $versionParts = $version.Split('.')
 if ($versionParts.Count -ne 3) {
@@ -125,7 +120,7 @@ function New-VersionResource {
 }
 '@ | Set-Content -LiteralPath $VersionInfoPath -NoNewline
 
-    & $goversioninfo `
+    go tool github.com/josephspurrier/goversioninfo/cmd/goversioninfo `
         -64 `
         -o $OutputPath `
         -company "Trustfall AB" `

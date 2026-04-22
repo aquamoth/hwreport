@@ -127,8 +127,29 @@ The script builds both `hwreport.exe` and `hwoverview.exe` in the repository roo
 
 - the semantic version derived from `VERSION` plus git commit height
 - the current commit hash
+- Windows version resource metadata for the executable properties dialog
 
 On Windows, `build.cmd` is the preferred entrypoint. It bypasses local PowerShell execution policy restrictions for this script invocation and adds the default Go install location (`C:\Program Files\Go\bin`) to `PATH` when needed.
+
+The Windows version-resource generator is tracked as a Go tool dependency in [go.mod](/abs/path/C:/Source/hwreport/go.mod:1). On a clean checkout, the first build may download that tool automatically through the normal Go module system. No separate manual install step or committed `.exe` helper is required.
+
+## Testing
+
+Run the normal unit test suite:
+
+```powershell
+go test ./...
+```
+
+The hard-drive benchmark lookup also has opt-in live integration tests under `internal/passmark`. These hit the real lookup site and are excluded from the default test run.
+
+The integration test uses a hardcoded regression set of known drive models taken from the existing report corpus and verifies that the live lookup resolves benchmark data for each of them.
+
+Run them explicitly when changing that lookup logic:
+
+```powershell
+go test -tags integration ./internal/passmark
+```
 
 ## Versioning
 
