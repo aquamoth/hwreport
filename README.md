@@ -118,21 +118,21 @@ Build the latest checked-out version with the provided script:
 .\build.cmd
 ```
 
-Or run the PowerShell script directly:
+Or run the Go-native build command directly:
 
 ```powershell
-pwsh -File .\build.ps1
+go run ./cmd/buildtool
 ```
 
-The script builds both `hwreport.exe` and `hwoverview.exe` in the repository root and embeds:
+The build command produces both `hwreport.exe` and `hwoverview.exe` in the repository root and embeds:
 
 - the semantic version derived from `VERSION` plus git commit height
 - the current commit hash
 - Windows version resource metadata for the executable properties dialog
 
-On Windows, `build.cmd` is the preferred entrypoint. It bypasses local PowerShell execution policy restrictions for this script invocation and adds the default Go install location (`C:\Program Files\Go\bin`) to `PATH` when needed.
+On Windows, `build.cmd` is just a thin convenience wrapper around `go run ./cmd/buildtool`.
 
-The Windows version-resource generator is tracked as a Go tool dependency in [go.mod](/abs/path/C:/Source/hwreport/go.mod:1). On a clean checkout, the first build may download that tool automatically through the normal Go module system. No separate manual install step or committed `.exe` helper is required.
+The Windows version-resource generator is tracked as a Go tool dependency in [go.mod](/abs/path/C:/Source/hwreport/go.mod:1). The build command invokes it through `go tool`, so on a clean checkout Go may download that pinned tool automatically through the normal module system. There is no custom downloader in the repo and no committed helper `.exe`.
 
 ## Testing
 
@@ -162,7 +162,7 @@ major.minor.patch
 
 `major.minor` is stored in the root [VERSION](/abs/path/c:/source/specreport/VERSION) file.
 
-`patch` is calculated by the build script as the number of commits since the last commit that changed `VERSION`, inclusive of that change commit. In practice:
+`patch` is calculated by the build command as the number of commits since the last commit that changed `VERSION`, inclusive of that change commit. In practice:
 
 - change `VERSION` from `1.0` to `1.1`
 - commit that change
