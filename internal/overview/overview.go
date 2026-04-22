@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"specreport/internal/monitorlookup"
 	"specreport/internal/passmark"
 	"specreport/internal/report"
 )
@@ -73,6 +74,7 @@ type detailPageData struct {
 	Versions       []versionLink
 	Report         *report.Report
 	Storage        []detailDrive
+	Monitors       []detailMonitor
 	PrettyJSON     string
 }
 
@@ -86,6 +88,18 @@ type detailDrive struct {
 	SequentialWriteMBps *float64
 	IOPS4KQD1MBps       *float64
 	LookupURL           string
+}
+
+type detailMonitor struct {
+	Model           string
+	PixelWidth      *uint32
+	PixelHeight     *uint32
+	PhysicalWidth   *float64
+	PhysicalHeight  *float64
+	PhysicalUnit    *string
+	PhysicalSource  string
+	LookupURL       string
+	RotationDegrees *int
 }
 
 type sourceRecord struct {
@@ -120,6 +134,11 @@ func Generate(options Options) (Result, error) {
 	}
 	driveCachePath := filepath.Join(inputDir, ".hwoverview-drive-cache.json")
 	driveClient, err := passmark.NewDriveClient(driveCachePath)
+	if err != nil {
+		return Result{}, err
+	}
+	monitorCachePath := filepath.Join(inputDir, ".hwoverview-monitor-cache.json")
+	monitorClient, err := monitorlookup.NewClient(monitorCachePath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -200,7 +219,7 @@ func Generate(options Options) (Result, error) {
 		})
 
 		for idx, record := range versions {
-			if err := writeDetailPage(record, versions, idx, options, driveClient, ctx); err != nil {
+			if err := writeDetailPage(record, versions, idx, options, driveClient, monitorClient, ctx); err != nil {
 				return Result{}, err
 			}
 		}
@@ -233,7 +252,7 @@ func Generate(options Options) (Result, error) {
 	return Result{OutputPath: outputPath}, nil
 }
 
-func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentIndex int, options Options, driveClient *passmark.DriveClient, ctx context.Context) error {
+func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentIndex int, options Options, driveClient *passmark.DriveClient, monitorClient *monitorlookup.Client, ctx context.Context) error {
 	prettyJSONBytes, err := json.MarshalIndent(record.Report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode report json for detail page: %w", err)
@@ -258,6 +277,7 @@ func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentInde
 		Versions:       versionLinks,
 		Report:         record.Report,
 		Storage:        buildDetailDrives(record.Report, driveClient, ctx),
+		Monitors:       buildDetailMonitors(record.Report, monitorClient, ctx),
 		PrettyJSON:     string(prettyJSONBytes),
 	}
 	if len(versions) > 1 {
@@ -378,6 +398,55 @@ func buildDetailDrives(data *report.Report, driveClient *passmark.DriveClient, c
 		drives = append(drives, item)
 	}
 	return drives
+}
+
+func buildDetailMonitors(data *report.Report, monitorClient *monitorlookup.Client, ctx context.Context) []detailMonitor {
+	monitors := make([]detailMonitor, 0, len(data.Monitors))
+	for _, monitor := range data.Monitors {
+		item := detailMonitor{
+			Model:           strings.TrimSpace(strings.TrimSpace(pointerString(monitor.Manufacturer)) + " " + strings.TrimSpace(pointerString(monitor.Model))),
+			PixelWidth:      monitor.PixelWidth,
+			PixelHeight:     monitor.PixelHeight,
+			PhysicalWidth:   monitor.PhysicalWidth,
+			PhysicalHeight:  monitor.PhysicalHeight,
+			PhysicalUnit:    monitor.PhysicalUnit,
+			PhysicalSource:  strings.TrimSpace(pointerString(monitor.PhysicalSource)),
+			RotationDegrees: monitor.RotationDegrees,
+		}
+		if item.Model == "" {
+			item.Model = strings.TrimSpace(pointerString(monitor.EdidDisplayName))
+		}
+
+		if shouldLookupMonitorSize(monitor) && monitorClient != nil {
+			if lookup, err := monitorClient.Lookup(ctx, pointerString(monitor.EdidPNPID)); err == nil {
+				if strings.TrimSpace(lookup.CanonicalName) != "" {
+					item.Model = lookup.CanonicalName
+				}
+				item.PhysicalWidth = lookup.PhysicalWidth
+				item.PhysicalHeight = lookup.PhysicalHeight
+				if strings.TrimSpace(lookup.PhysicalUnit) != "" {
+					item.PhysicalUnit = &lookup.PhysicalUnit
+				}
+				item.PhysicalSource = "linux-hardware"
+				item.LookupURL = strings.TrimSpace(lookup.LookupURL)
+			}
+		}
+
+		monitors = append(monitors, item)
+	}
+	return monitors
+}
+
+func shouldLookupMonitorSize(monitor report.Monitor) bool {
+	pnpID := strings.TrimSpace(pointerString(monitor.EdidPNPID))
+	if pnpID == "" {
+		return false
+	}
+	source := strings.ToLower(strings.TrimSpace(pointerString(monitor.PhysicalSource)))
+	if monitor.PhysicalWidth == nil || monitor.PhysicalHeight == nil {
+		return true
+	}
+	return source == "" || source == "wmi"
 }
 
 func renderPage(data pageData) ([]byte, error) {
@@ -1164,14 +1233,15 @@ const detailTemplate = `<!DOCTYPE html>
     <section class="panel">
       <h2>Monitors</h2>
       <table class="list-table">
-        <tr><th>Model</th><th>Pixels</th><th>Physical Size</th><th>Diagonal</th><th>Aspect Ratio</th><th>Rotation</th></tr>
-        {{ range .Report.Monitors }}
+        <tr><th>Model</th><th>Pixels</th><th>Physical Size</th><th>Diagonal</th><th>Aspect Ratio</th><th>Source</th><th>Rotation</th></tr>
+        {{ range .Monitors }}
         <tr>
-          <td>{{ fmtString .Manufacturer }} {{ fmtString .Model }}</td>
+          <td>{{ .Model }}</td>
           <td>{{ fmtPixels .PixelWidth .PixelHeight }}</td>
           <td>{{ fmtPhysical .PhysicalWidth .PhysicalHeight .PhysicalUnit }}</td>
           <td>{{ fmtDiagonalInches .PhysicalWidth .PhysicalHeight .PhysicalUnit }}</td>
           <td>{{ fmtAspectRatio .PixelWidth .PixelHeight .PhysicalWidth .PhysicalHeight }}</td>
+          <td>{{ if .LookupURL }}<a href="{{ .LookupURL }}">{{ .PhysicalSource }}</a>{{ else }}{{ .PhysicalSource }}{{ end }}</td>
           <td>{{ fmtInt .RotationDegrees }}</td>
         </tr>
         {{ end }}

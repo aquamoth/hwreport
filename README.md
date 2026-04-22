@@ -20,6 +20,7 @@ The binary is written in Go. The executable can be copied to removable media and
 - Storage devices, size, type, and best-effort SMART status
 - GPU manufacturer and model
 - Active monitors, pixel and physical size when available, and current rotation
+- EDID-derived monitor identifiers and physical size when Windows exposes monitor EDID data
 
 ## hwreport: Usage
 
@@ -177,3 +178,5 @@ This is intentionally similar to version-height schemes such as NerdBank.GitVers
 - Monitor rotation is reported using standard Windows values: `0`, `90`, `180`, or `270`.
 - Disk manufacture dates and empty memory slot locations are often unavailable on typical systems.
 - `hwoverview` uses PassMark's CPU lookup pages to resolve CPU Mark values and caches those lookups locally in the input directory.
+- `hwreport` stays offline-only. Monitor physical size is taken from local EDID parsing when possible, with WMI used only as a fallback.
+- `hwoverview` may enrich missing or weak monitor physical-size data using model-level monitor IDs such as `BOE0CB4`, and caches those lookups locally in the input directory.

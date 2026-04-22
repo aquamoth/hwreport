@@ -30,7 +30,7 @@ func Collect() (*report.Report, error) {
 		return nil, fmt.Errorf("decode collector output: %w", err)
 	}
 
-	out.SchemaVersion = 2
+	out.SchemaVersion = 3
 	out.CollectedAtUTC = time.Now().UTC().Format(time.RFC3339)
 	out.Hostname = hostname
 	return &out, nil
@@ -171,6 +171,105 @@ function Decode-Uint16String($values) {
   $text = (-join $chars.ToArray()).Trim()
   if ([string]::IsNullOrWhiteSpace($text)) { return $null }
   return $text
+}
+
+function Get-UInt16LE($bytes, $offset) {
+  if ($null -eq $bytes -or $bytes.Length -lt ($offset + 2)) { return $null }
+  return ([int]$bytes[$offset]) + (([int]$bytes[$offset + 1]) * 256)
+}
+
+function Decode-EdidManufacturerId($bytes) {
+  $value = Get-UInt16LE $bytes 8
+  if ($null -eq $value) { return $null }
+  $word = (($value -band 0xFF) -shl 8) -bor (($value -shr 8) -band 0xFF)
+  $chars = @(
+    [char](64 + (($word -shr 10) -band 0x1F)),
+    [char](64 + (($word -shr 5) -band 0x1F)),
+    [char](64 + ($word -band 0x1F))
+  )
+  $text = (-join $chars).Trim()
+  if ($text -notmatch '^[A-Z]{3}$') { return $null }
+  return $text
+}
+
+function Decode-EdidText($bytes, $offset) {
+  if ($null -eq $bytes -or $bytes.Length -lt ($offset + 18)) { return $null }
+  if ($bytes[$offset] -ne 0 -or $bytes[$offset + 1] -ne 0 -or $bytes[$offset + 2] -ne 0) { return $null }
+  $raw = $bytes[($offset + 5)..($offset + 17)]
+  $chars = New-Object System.Collections.Generic.List[char]
+  foreach ($value in $raw) {
+    if ($value -eq 0x00 -or $value -eq 0x0A) { break }
+    if ($value -ge 32 -and $value -le 126) {
+      [void]$chars.Add([char][int]$value)
+    }
+  }
+  $text = (-join $chars.ToArray()).Trim()
+  if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+  return $text
+}
+
+function Get-EdidDetailedTimingSizeMm($bytes) {
+  if ($null -eq $bytes -or $bytes.Length -lt 128) { return $null }
+  foreach ($offset in @(54, 72, 90, 108)) {
+    if ($bytes.Length -lt ($offset + 18)) { continue }
+    $pixelClock = Get-UInt16LE $bytes $offset
+    if ($null -eq $pixelClock -or $pixelClock -eq 0) { continue }
+    $widthMm = ([int]$bytes[$offset + 12]) + (([int]($bytes[$offset + 14] -band 0xF0)) -shl 4)
+    $heightMm = ([int]$bytes[$offset + 13]) + (([int]($bytes[$offset + 14] -band 0x0F)) -shl 8)
+    if ($widthMm -gt 0 -and $heightMm -gt 0) {
+      return [ordered]@{
+        width_cm = [math]::Round(([double]$widthMm / 10.0), 1)
+        height_cm = [math]::Round(([double]$heightMm / 10.0), 1)
+        unit = 'cm'
+        source = 'edid_dtd'
+      }
+    }
+  }
+  return $null
+}
+
+function Parse-EdidInfo($bytes) {
+  if ($null -eq $bytes -or $bytes.Length -lt 128) { return $null }
+  if ($bytes[0] -ne 0x00 -or $bytes[1] -ne 0xFF -or $bytes[2] -ne 0xFF -or $bytes[3] -ne 0xFF) { return $null }
+
+  $manufacturerId = Decode-EdidManufacturerId $bytes
+  $productCode = Get-UInt16LE $bytes 10
+  $pnpId = $null
+  if ($manufacturerId -and $null -ne $productCode) {
+    $pnpId = "{0}{1:X4}" -f $manufacturerId, $productCode
+  }
+
+  $displayName = $null
+  foreach ($offset in @(54, 72, 90, 108)) {
+    if ($bytes.Length -lt ($offset + 18)) { continue }
+    if ($bytes[$offset + 3] -eq 0xFC) {
+      $displayName = Decode-EdidText $bytes $offset
+      if ($displayName) { break }
+    }
+  }
+
+  $size = Get-EdidDetailedTimingSizeMm $bytes
+  if (-not $size) {
+    $widthCm = [int]$bytes[21]
+    $heightCm = [int]$bytes[22]
+    if ($widthCm -gt 0 -and $heightCm -gt 0) {
+      $size = [ordered]@{
+        width_cm = [double]$widthCm
+        height_cm = [double]$heightCm
+        unit = 'cm'
+        source = 'edid_base'
+      }
+    }
+  }
+
+  return [ordered]@{
+    pnp_id = $pnpId
+    display_name = $displayName
+    physical_width = if ($size) { $size.width_cm } else { $null }
+    physical_height = if ($size) { $size.height_cm } else { $null }
+    physical_unit = if ($size) { $size.unit } else { $null }
+    physical_source = if ($size) { $size.source } else { $null }
+  }
 }
 
 function Get-UniqueValue($values) {
@@ -475,6 +574,7 @@ $gpusRaw = @(Get-CimInstance Win32_VideoController)
 $desktopMonitorsRaw = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue)
 $monitorIDsRaw = @(Get-CimInstance -Namespace 'root\wmi' -ClassName WmiMonitorID -Filter 'Active = TRUE' -ErrorAction SilentlyContinue)
 $monitorParamsRaw = @(Get-CimInstance -Namespace 'root\wmi' -ClassName WmiMonitorBasicDisplayParams -Filter 'Active = TRUE' -ErrorAction SilentlyContinue)
+$displayRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
 
 $memoryTypeMap = @{
   20 = 'DDR'
@@ -537,6 +637,22 @@ foreach ($item in $monitorParamsRaw) {
     physical_width = if ($null -ne $item.MaxHorizontalImageSize -and [int]$item.MaxHorizontalImageSize -gt 0) { [double]$item.MaxHorizontalImageSize } else { $null }
     physical_height = if ($null -ne $item.MaxVerticalImageSize -and [int]$item.MaxVerticalImageSize -gt 0) { [double]$item.MaxVerticalImageSize } else { $null }
     physical_unit = if (($null -ne $item.MaxHorizontalImageSize -and [int]$item.MaxHorizontalImageSize -gt 0) -or ($null -ne $item.MaxVerticalImageSize -and [int]$item.MaxVerticalImageSize -gt 0)) { 'cm' } else { $null }
+  }
+}
+
+$monitorEdidByKey = @{}
+foreach ($vendorKey in @(Get-ChildItem -Path $displayRegistryRoot -ErrorAction SilentlyContinue)) {
+  foreach ($instanceKey in @(Get-ChildItem -Path $vendorKey.PSPath -ErrorAction SilentlyContinue)) {
+    $devicePath = Join-Path $instanceKey.PSPath 'Device Parameters'
+    $props = Get-ItemProperty -Path $devicePath -ErrorAction SilentlyContinue
+    if (-not $props -or $null -eq $props.EDID) { continue }
+    $identity = "DISPLAY\{0}\{1}" -f $vendorKey.PSChildName, $instanceKey.PSChildName
+    $normalized = Normalize-MonitorIdentityKey $identity
+    if (-not $normalized) { continue }
+    $parsedEdid = Parse-EdidInfo $props.EDID
+    if ($parsedEdid) {
+      $monitorEdidByKey[$normalized] = $parsedEdid
+    }
   }
 }
 
@@ -632,6 +748,7 @@ foreach ($monitor in $monitorIDsRaw) {
     }
   }
   $params = $monitorParamsByKey[$instanceKey]
+  $edid = $monitorEdidByKey[$instanceKey]
   $displayInfo = $null
   foreach ($entry in $displayByKey.GetEnumerator()) {
     if (Match-Key $entry.Key $instanceKey) {
@@ -654,11 +771,14 @@ foreach ($monitor in $monitorIDsRaw) {
   [ordered]@{
     manufacturer = $manufacturer
     model = $model
+    edid_pnp_id = $(if ($edid) { $edid.pnp_id } else { $null })
+    edid_display_name = $(if ($edid) { $edid.display_name } else { $null })
     pixel_width = $(if ($displayInfo) { $displayInfo.pixel_width } elseif ($desktop) { $desktop.pixel_width } else { $null })
     pixel_height = $(if ($displayInfo) { $displayInfo.pixel_height } elseif ($desktop) { $desktop.pixel_height } else { $null })
-    physical_width = $(if ($params) { $params.physical_width } else { $null })
-    physical_height = $(if ($params) { $params.physical_height } else { $null })
-    physical_unit = $(if ($params) { $params.physical_unit } else { $null })
+    physical_width = $(if ($edid -and $edid.physical_width) { $edid.physical_width } elseif ($params) { $params.physical_width } else { $null })
+    physical_height = $(if ($edid -and $edid.physical_height) { $edid.physical_height } elseif ($params) { $params.physical_height } else { $null })
+    physical_unit = $(if ($edid -and $edid.physical_unit) { $edid.physical_unit } elseif ($params) { $params.physical_unit } else { $null })
+    physical_source = $(if ($edid -and $edid.physical_source) { $edid.physical_source } elseif ($params) { 'wmi' } else { $null })
     rotation_degrees = $(if ($displayInfo) { $displayInfo.rotation_degrees } else { $null })
   }
 }

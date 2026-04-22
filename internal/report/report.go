@@ -83,10 +83,13 @@ type GPU struct {
 type Monitor struct {
 	Manufacturer    *string  `json:"manufacturer"`
 	Model           *string  `json:"model"`
+	EdidPNPID       *string  `json:"edid_pnp_id,omitempty"`
+	EdidDisplayName *string  `json:"edid_display_name,omitempty"`
 	PixelWidth      *uint32  `json:"pixel_width"`
 	PixelHeight     *uint32  `json:"pixel_height"`
 	PhysicalWidth   *float64 `json:"physical_width"`
 	PhysicalHeight  *float64 `json:"physical_height"`
 	PhysicalUnit    *string  `json:"physical_unit"`
+	PhysicalSource  *string  `json:"physical_source,omitempty"`
 	RotationDegrees *int     `json:"rotation_degrees"`
 }

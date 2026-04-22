@@ -67,11 +67,13 @@ func TestGenerateUsesNewestSnapshotAndLoopsDetailNavigation(t *testing.T) {
 			{
 				Manufacturer:   stringPtr("Dell"),
 				Model:          stringPtr("U2422H"),
+				EdidPNPID:      stringPtr("DEL40F4"),
 				PixelWidth:     uint32Ptr(1920),
 				PixelHeight:    uint32Ptr(1080),
 				PhysicalWidth:  float64Ptr(53),
 				PhysicalHeight: float64Ptr(30),
 				PhysicalUnit:   stringPtr("cm"),
+				PhysicalSource: stringPtr("edid_dtd"),
 			},
 		},
 	})
@@ -178,6 +180,9 @@ func TestGenerateUsesNewestSnapshotAndLoopsDetailNavigation(t *testing.T) {
 	}
 	if !strings.Contains(newestDetail, ">16:9<") {
 		t.Fatalf("newest detail should render monitor aspect ratio, got:\n%s", newestDetail)
+	}
+	if !strings.Contains(newestDetail, ">edid_dtd<") {
+		t.Fatalf("newest detail should render monitor physical-size source, got:\n%s", newestDetail)
 	}
 	if _, err := os.Stat(filepath.Join(detailDir, "stale.html")); !os.IsNotExist(err) {
 		t.Fatalf("stale detail page should be removed before regeneration")
