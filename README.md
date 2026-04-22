@@ -112,6 +112,12 @@ Requirements:
 Build the latest checked-out version with the provided script:
 
 ```powershell
+.\build.cmd
+```
+
+Or run the PowerShell script directly:
+
+```powershell
 pwsh -File .\build.ps1
 ```
 
@@ -119,6 +125,8 @@ The script builds both `hwreport.exe` and `hwoverview.exe` in the repository roo
 
 - the semantic version derived from `VERSION` plus git commit height
 - the current commit hash
+
+On Windows, `build.cmd` is the preferred entrypoint. It bypasses local PowerShell execution policy restrictions for this script invocation and adds the default Go install location (`C:\Program Files\Go\bin`) to `PATH` when needed.
 
 ## Versioning
 
