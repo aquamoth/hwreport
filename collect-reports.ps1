@@ -20,12 +20,21 @@ sees that user's monitors, resolution and rotation), and nothing stays behind
 on the computer. Computers where nobody is signed in are skipped and listed,
 unless you pass -AllowNoUser.
 
-Computers that already have a report in -OutputDir are skipped as well, so
-running the script again only reaches the ones that are still missing. Pass
--IncludeReported to collect from them again.
+A computer counts as complete once -OutputDir holds a report for it that was
+taken in a user session (with -AllowNoUser, any report counts). Complete
+computers are skipped, so the script can run repeatedly, for example hourly,
+and only reaches the ones still missing. Pass -IncludeReported to collect from
+them again.
 
-Finally it writes a CSV with each host's result and builds overview.html if
-hwoverview.exe sits next to the exe.
+Each run rewrites progress.csv in -OutputDir with one row per computer:
+  COMPLETE           has a complete report from an earlier run
+  COLLECTED          report collected in this run, in a user session
+  COLLECTED-NO-USER  report collected in this run without a user (-AllowNoUser)
+  WAITING            reachable, but nobody signed in; hwreport not started
+  UNREACHABLE        no WinRM connection (off, asleep, or WinRM not enabled)
+  FAILED             connected, but copying, running or saving failed
+and appends what happened to collect-history.csv. It builds overview.html if
+hwoverview.exe sits next to the exe and something new was collected.
 
 Works in Windows PowerShell 3.0 and later and PowerShell 7. Requirements:
   - WinRM enabled on the targets (see README.md, GPO "WinRM - LAN admins")
@@ -125,24 +134,25 @@ if ($ComputerName) {
 
 $results = @{}
 foreach ($t in $targets) {
-    $results[$t] = [pscustomobject]@{ Host = $t; Status = 'FAIL'; Context = ''; Report = ''; Detail = '' }
+    $results[$t] = [pscustomobject]@{ Host = $t; Status = 'UNREACHABLE'; Context = ''; Report = ''; Detail = '' }
 }
 
 if (-not $IncludeReported) {
-    # Hostnames that already have a report in the output folder.
+    # Hostnames that already have a complete report in the output folder:
+    # taken in a user session, or any report when -AllowNoUser is given.
     $reported = @{}
-    foreach ($f in Get-ChildItem -LiteralPath $OutputDir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
+    foreach ($f in Get-ChildItem -LiteralPath $OutputDir -Filter '*.json' -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }) {
         if ($f.Name -like '.*') { continue }
-        try { $h = (Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json).hostname } catch { $h = $null }
-        if ($h) { $reported[$h.ToUpper()] = $f.Name }
+        try { $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $j = $null }
+        if (-not $j -or -not $j.hostname) { continue }
+        if ($j.logged_in_user -or $AllowNoUser) { $reported[([string]$j.hostname).ToUpper()] = $f.Name }
     }
     $remaining = @()
     foreach ($t in $targets) {
         $short = $t.Split('.')[0].ToUpper()
         if ($reported.ContainsKey($short)) {
-            $results[$t].Status = 'SKIPPED'
+            $results[$t].Status = 'COMPLETE'
             $results[$t].Report = $reported[$short]
-            $results[$t].Detail = 'Already reported (use -IncludeReported to run again).'
         } else {
             $remaining += $t
         }
@@ -163,7 +173,7 @@ if ($targets.Count -gt 0) {
             -ErrorVariable connectErrors @credSplat)
 
     $connected = @{}
-    foreach ($s in $sessions) { $connected[$s.ComputerName] = $true }
+    foreach ($s in $sessions) { $connected[$s.ComputerName] = $true; $results[$s.ComputerName].Status = 'FAILED' }
     foreach ($t in $targets) {
         if ($connected.ContainsKey($t)) { continue }
         $msg = $connectErrors |
@@ -311,7 +321,7 @@ try {
         $r = $results[$o.PSComputerName]
         $r.Context = $o.Context
         if (-not $o.Json) {
-            $r.Status = 'SKIPPED'
+            $r.Status = 'WAITING'
             $r.Detail = 'Nobody signed in; hwreport was not started.'
             continue
         }
@@ -324,12 +334,12 @@ try {
         }
         try {
             [IO.File]::WriteAllText($path, $o.Json, $utf8)
-            $r.Status = 'OK'
+            if ($o.Context -like 'user:*') { $r.Status = 'COLLECTED' } else { $r.Status = 'COLLECTED-NO-USER' }
             $r.Detail = ''
             $r.Report = Split-Path -Leaf $path
         } catch {
             # No fallback copy anywhere: mark it failed and rerun that computer.
-            $r.Status = 'FAIL'
+            $r.Status = 'FAILED'
             $r.Detail = "Save: $($_.Exception.Message)"
         }
     }
@@ -346,23 +356,43 @@ try {
 }
 
 foreach ($r in $results.Values) {
-    if ($r.Status -eq 'FAIL' -and -not $r.Detail) { $r.Detail = 'No output returned.' }
+    if ($r.Status -eq 'FAILED' -and -not $r.Detail) { $r.Detail = 'No output returned.' }
 }
 
 # --- 6. Summary, CSV and overview -------------------------------------------
 
+$now = Get-Date -Format 'yyyy-MM-dd HH:mm'
 $rows = @($results.Values | Sort-Object Status, Host)
-$csv = Join-Path $OutputDir ("collect-{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd-HHmm'))
-$csvArgs = @{ LiteralPath = $csv; Encoding = 'UTF8' }
+$csvArgs = @{ Encoding = 'UTF8' }
 if ($PSVersionTable.PSVersion.Major -lt 6) { $csvArgs.NoTypeInformation = $true }
-$rows | Export-Csv @csvArgs
+
+# Current state of every computer, rewritten each run.
+$progressCsv = Join-Path $OutputDir 'progress.csv'
+$rows | Select-Object Host, Status, Context, Report, Detail, @{ n = 'Checked'; e = { $now } } |
+    Export-Csv -LiteralPath $progressCsv @csvArgs
+
+# What happened in this run, appended (complete computers are left out).
+$historyCsv = Join-Path $OutputDir 'collect-history.csv'
+$happened = @($rows | Where-Object Status -ne 'COMPLETE')
+if ($happened.Count -gt 0) {
+    $happened | Select-Object @{ n = 'Time'; e = { $now } }, Host, Status, Context, Report, Detail |
+        Export-Csv -LiteralPath $historyCsv -Append @csvArgs
+}
+
 $rows | Format-Table Host, Status, Context, Report, Detail -AutoSize -Wrap
 
-$ok      = @($rows | Where-Object Status -eq 'OK').Count
-$skipped = @($rows | Where-Object Status -eq 'SKIPPED').Count
-Write-Host ("Done. {0} collected, {1} skipped, {2} failed. Reports in {3}" -f $ok, $skipped, ($rows.Count - $ok - $skipped), $OutputDir)
-Write-Host ("Per-host results: {0}" -f $csv)
+$count = @{}
+foreach ($st in 'COMPLETE', 'COLLECTED', 'COLLECTED-NO-USER', 'WAITING', 'UNREACHABLE', 'FAILED') {
+    $count[$st] = @($rows | Where-Object Status -eq $st).Count
+}
+$new = $count['COLLECTED'] + $count['COLLECTED-NO-USER']
+$done = $count['COMPLETE'] + $count['COLLECTED']
+if ($AllowNoUser) { $done += $count['COLLECTED-NO-USER'] }
+Write-Host ("{0} of {1} complete ({2} collected in this run). Waiting for a user: {3}. Unreachable: {4}. Failed: {5}." -f `
+    $done, $rows.Count, $new, $count['WAITING'], $count['UNREACHABLE'], $count['FAILED'])
+Write-Host ("Progress: {0}" -f $progressCsv)
 
+$ok = $new
 $overviewExe = Join-Path (Split-Path -Parent $ExePath) 'hwoverview.exe'
 if ($ok -gt 0 -and (Test-Path -LiteralPath $overviewExe)) {
     $overviewHtml = Join-Path $OutputDir 'overview.html'
