@@ -4,7 +4,7 @@
 
 It currently contains two standalone Windows executables:
 
-- `hwreport.exe` collects a JSON report from a single computer
+- `hwreport.exe` collects a JSON report from a single computer (`hwreportw.exe` is the same program without a console window, for scheduled tasks)
 - `hwoverview.exe` aggregates many report JSON files into an HTML overview table
 
 The binary is written in Go. The executable can be copied to removable media and run on Windows 11 computers to produce per-machine report files for later aggregation.
@@ -107,19 +107,35 @@ HOSTNAME-YYYY-MM-DD-2.json
 
 ## Collecting From Every Office Computer
 
-`collect-reports.ps1` runs `hwreport.exe` on every domain computer over PowerShell remoting (WinRM) and gathers the JSON files in one folder. Nobody has to visit the machines.
+There are two ways to collect from a whole domain, and they work together:
 
-### One-time setup: enable WinRM on the PCs
+- **Group Policy (one report per PC, no remote access needed):** a scheduled task runs `hwreportw.exe` as the signed-in user and drops the report on a share. PCs that are off today report the next time someone signs in.
+- **`collect-reports.ps1` (on demand):** runs `hwreport.exe` on every reachable PC over PowerShell remoting (WinRM) right now.
 
-Windows 11 clients have WinRM turned off by default. Turn it on for the office PCs with a Group Policy Object linked to their OU:
+### Group Policy deployment
 
-1. **Computer Configuration → Policies → Administrative Templates → Windows Components → Windows Remote Management (WinRM) → WinRM Service → Allow remote server management through WinRM**: Enabled, IPv4 filter `*` (or your office subnet).
+[deploy/Install-HwreportGpos.ps1](deploy/Install-HwreportGpos.ps1) runs on a domain controller as a Domain Admin. It creates:
+
+- **Share `\\<dc>\hwreport$`** (default `E:\Shares\hwreport`). Domain users can run the exes from the root. In `reports\` they can create files but can't list or read them.
+- **OU `Workstations`** at the domain root. GPOs can't be linked to the default `Computers` container, so move the workstations here.
+- **GPO `WinRM - LAN admins`**: enables WinRM. The firewall allows TCP 5985 only from the office subnet and only on the domain profile, and the WinRM service is set to automatic and started. Over the network Windows filters local accounts out of the Administrators token, so only domain accounts that are local admins get in.
+- **GPO `hwreport inventory`**: a scheduled task that runs `hwreportw.exe --out <share>\reports --once <key>` as `BUILTIN\Users` at least privilege, in each signed-in user's session. It fires 5 minutes after logon and daily at 11:00. Because of `--once`, each PC reports once per key. The task is set to "remove when no longer applied", so unlinking the GPO deletes it.
+
+The script links nothing. Link each GPO where it should apply, then copy `hwreportw.exe`, `hwreport.exe`, `hwoverview.exe` and `collect-reports.ps1` to the share. To run a new inventory round later, change the `--once` key in the task (for example `inventory-2027-05`).
+
+`hwreportw.exe` is `hwreport.exe` built as a Windows GUI-subsystem program, so a scheduled run opens no console window. It runs as a normal user: disk health, monitors, resolution and rotation all work without admin rights.
+
+### Enabling WinRM by hand
+
+Without the GPO above, Windows 11 clients have WinRM turned off. The equivalent settings in a Group Policy Object are:
+
+1. **Computer Configuration → Policies → Administrative Templates → Windows Components → Windows Remote Management (WinRM) → WinRM Service → Allow remote server management through WinRM**: Enabled, IPv4 filter `*`.
 2. **Computer Configuration → Policies → Windows Settings → Security Settings → System Services → Windows Remote Management (WS-Management)**: Automatic.
-3. **Computer Configuration → Policies → Windows Settings → Security Settings → Windows Defender Firewall with Advanced Security → Inbound Rules**: add the predefined rule **Windows Remote Management**, for the Domain profile.
+3. **Computer Configuration → Policies → Windows Settings → Security Settings → Windows Defender Firewall with Advanced Security → Inbound Rules**: allow TCP 5985 from your office subnet, Domain profile.
 
 PCs pick this up at their next policy refresh (or run `gpupdate /force` on them, or reboot). The account you collect with must be a local administrator on the PCs, which Domain Admins are by default.
 
-### Running a collection
+### Running a collection over WinRM
 
 Run from a domain-joined office PC or server, with `hwreport.exe` (and optionally `hwoverview.exe`) next to the script. Getting the computer list from AD needs the RSAT ActiveDirectory module. Windows PowerShell 3.0 or later (Server 2012 R2 has 4.0) and PowerShell 7 all work.
 
