@@ -328,12 +328,9 @@ try {
             $r.Detail = ''
             $r.Report = Split-Path -Leaf $path
         } catch {
-            # Never lose a collected report: fall back to the local temp folder.
-            $fallback = Join-Path ([IO.Path]::GetTempPath()) "$base-$runId.json"
-            [IO.File]::WriteAllText($fallback, $o.Json, $utf8)
-            $r.Status = 'OK'
-            $r.Report = $fallback
-            $r.Detail = "Could not write to $OutputDir ($($_.Exception.Message)); saved locally instead."
+            # No fallback copy anywhere: mark it failed and rerun that computer.
+            $r.Status = 'FAIL'
+            $r.Detail = "Save: $($_.Exception.Message)"
         }
     }
 } finally {
