@@ -63,6 +63,7 @@ type buildTarget struct {
 	OriginalName    string
 	VersionInfoJSON string
 	VersionInfoSyso string
+	ExtraLdflags    string
 }
 
 func main() {
@@ -126,6 +127,18 @@ func run() error {
 			VersionInfoSyso: filepath.Join(repoRoot, "cmd", "hwreport", "zz_versioninfo.syso"),
 		},
 		{
+			// Same program without a console window, for scheduled tasks
+			// that run in a user's session.
+			PackagePath:     "./cmd/hwreport",
+			OutputName:      filepath.Join(repoRoot, "hwreportw.exe"),
+			Description:     "Hardware inventory collector (no console window)",
+			InternalName:    "hwreportw",
+			OriginalName:    "hwreportw.exe",
+			VersionInfoJSON: filepath.Join(repoRoot, "cmd", "hwreport", "zz_versioninfo.json"),
+			VersionInfoSyso: filepath.Join(repoRoot, "cmd", "hwreport", "zz_versioninfo.syso"),
+			ExtraLdflags:    "-H windowsgui",
+		},
+		{
 			PackagePath:     "./cmd/hwoverview",
 			OutputName:      filepath.Join(repoRoot, "hwoverview.exe"),
 			Description:     "Hardware overview report generator",
@@ -170,7 +183,11 @@ func run() error {
 			return fmt.Errorf("goversioninfo failed for %s: %w", target.OriginalName, err)
 		}
 
-		if err := runCommand(repoRoot, goEnv, "go", "build", "-trimpath", "-ldflags", ldflags, "-o", target.OutputName, target.PackagePath); err != nil {
+		targetLdflags := ldflags
+		if target.ExtraLdflags != "" {
+			targetLdflags += " " + target.ExtraLdflags
+		}
+		if err := runCommand(repoRoot, goEnv, "go", "build", "-trimpath", "-ldflags", targetLdflags, "-o", target.OutputName, target.PackagePath); err != nil {
 			return fmt.Errorf("build %s: %w", target.OriginalName, err)
 		}
 		fmt.Printf("Built %s\n", target.OutputName)

@@ -2,6 +2,7 @@
 .tools/
 .hwoverview-*-cache.json
 hwreport.exe
+hwreportw.exe
 hwoverview.exe
 sample-report*.json
 reports/

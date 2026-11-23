@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"specreport/internal/collector"
+	"specreport/internal/once"
 	"specreport/internal/output"
 	versioninfo "specreport/internal/version"
 )
@@ -37,11 +38,29 @@ func main() {
 
 	outFlag := flag.String("out", "", "Output JSON file path")
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	onceFlag := flag.String("once", "", "Report only once per computer for this `key`; later runs with the same key exit without collecting (marker in %ProgramData%\\hwreport)")
 	flag.Parse()
 
 	if *versionFlag {
 		fmt.Println(versioninfo.Get().String())
 		return
+	}
+
+	onceDir := once.DefaultDir()
+	if *onceFlag != "" {
+		if err := once.ValidateKey(*onceFlag); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		done, err := once.Done(onceDir, *onceFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "check once marker: %v\n", err)
+			os.Exit(1)
+		}
+		if done {
+			fmt.Printf("Already reported for %q (marker %s)\n", *onceFlag, once.MarkerPath(onceDir, *onceFlag))
+			return
+		}
 	}
 
 	report, err := collector.Collect()
@@ -62,4 +81,10 @@ func main() {
 	}
 
 	fmt.Println(outputPath)
+
+	if *onceFlag != "" {
+		if err := once.Mark(onceDir, *onceFlag, outputPath, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: report written but once marker failed: %v\n", err)
+		}
+	}
 }

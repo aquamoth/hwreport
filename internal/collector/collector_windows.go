@@ -9,10 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"specreport/internal/report"
 )
+
+const createNoWindow = 0x08000000
 
 func Collect() (*report.Report, error) {
 	hostname, err := os.Hostname()
@@ -53,6 +56,10 @@ func runCollectorScript() ([]byte, error) {
 		"-File",
 		scriptPath,
 	)
+	// Never show a console window for the PowerShell child. This matters for
+	// hwreportw.exe (no console of its own) started by a scheduled task in a
+	// user's session; output is captured through pipes either way.
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
 	output, err := cmd.Output()
 	if err == nil {
