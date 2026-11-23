@@ -3,6 +3,7 @@
 package collector
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,6 +30,7 @@ func Collect() (*report.Report, error) {
 	}
 
 	var out report.Report
+	payload = bytes.TrimPrefix(payload, []byte("\xef\xbb\xbf")) // UTF-8 BOM
 	if err := json.Unmarshal(payload, &out); err != nil {
 		return nil, fmt.Errorf("decode collector output: %w", err)
 	}
@@ -92,6 +94,9 @@ func writeCollectorScript() (string, error) {
 
 const collectorScript = `
 $ErrorActionPreference = 'Stop'
+# Emit UTF-8 (no BOM). Otherwise a redirected stdout uses the OEM code page
+# (CP932 on Japanese Windows) and every non-ASCII string arrives garbled.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 
 function Convert-DateOnly($value) {
   if ($null -eq $value) { return $null }
@@ -142,8 +147,12 @@ function Normalize-Manufacturer($value) {
   switch ($text) {
     'AuthenticAMD' { return 'AMD' }
     'GenuineIntel' { return 'Intel' }
-    '(Standard disk drives)' { return $null }
-    default { return $text }
+    default {
+      # Windows placeholders such as "(Standard disk drives)" are localized
+      # (Japanese Windows uses its own text), but always in parentheses.
+      if ($text -match '^\(.*\)$') { return $null }
+      return $text
+    }
   }
 }
 
