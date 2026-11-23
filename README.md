@@ -121,7 +121,7 @@ PCs pick this up at their next policy refresh (or run `gpupdate /force` on them,
 
 ### Running a collection
 
-Run from a domain-joined office PC or server, with `hwreport.exe` (and optionally `hwoverview.exe`) next to the script. Getting the computer list from AD needs the RSAT ActiveDirectory module. Windows PowerShell 5.1 or PowerShell 7 both work.
+Run from a domain-joined office PC or server, with `hwreport.exe` (and optionally `hwoverview.exe`) next to the script. Getting the computer list from AD needs the RSAT ActiveDirectory module. Windows PowerShell 3.0 or later (Server 2012 R2 has 4.0) and PowerShell 7 all work.
 
 ```powershell
 # Every enabled Windows computer in AD, as an admin account you are prompted for

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 3.0
 <#
 .SYNOPSIS
 Runs hwreport.exe on every reachable domain computer over WinRM and collects
@@ -14,7 +14,7 @@ Run this from a domain-joined office PC or server. It:
   5. writes a CSV with each host's result next to the reports, and
   6. builds overview.html if hwoverview.exe sits next to hwreport.exe.
 
-Works in Windows PowerShell 5.1 and PowerShell 7. Requirements:
+Works in Windows PowerShell 3.0 and later (Server 2012 R2 ships 4.0) and PowerShell 7. Requirements:
   - WinRM enabled on the target PCs (Windows 11 clients have it off by
     default; enable it by Group Policy, see README.md)
   - an account that is a local administrator on the targets
@@ -59,8 +59,8 @@ Maximum number of hosts handled at the same time.
 param(
     [string]   $OutputDir = '.\reports',
     [string]   $ExePath,
-    [pscredential][System.Management.Automation.Credential()]
-               $Credential = [pscredential]::Empty,
+    [System.Management.Automation.PSCredential][System.Management.Automation.Credential()]
+               $Credential = [System.Management.Automation.PSCredential]::Empty,
     [string[]] $ComputerName,
     [string]   $Filter,
     [string]   $SearchBase,
@@ -75,7 +75,7 @@ $null = New-Item -ItemType Directory -Force -Path $OutputDir
 $OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
 $credSplat = @{}
-if ($Credential -ne [pscredential]::Empty) { $credSplat.Credential = $Credential }
+if ($Credential -ne [System.Management.Automation.PSCredential]::Empty) { $credSplat.Credential = $Credential }
 
 # --- 1. Target list ----------------------------------------------------------
 
@@ -131,18 +131,36 @@ foreach ($t in $targets) {
 Write-Host ("Connected to {0} of {1}. Copying hwreport.exe..." -f $sessions.Count, $targets.Count)
 
 try {
-    # --- 3. Copy the exe to each session -------------------------------------
+    # --- 3. Copy the exe to all sessions -------------------------------------
+    # Copy-Item -ToSession needs PowerShell 5, so send the exe in base64 chunks
+    # to every session at once. Each chunk stays far below the 10 MB remoting
+    # object limit.
 
-    $ready = @()
-    foreach ($s in $sessions) {
-        try {
-            $remoteExe = Invoke-Command -Session $s -ScriptBlock {
-                Join-Path $env:TEMP ("hwreport-{0}.exe" -f [guid]::NewGuid().ToString('N'))
+    $remoteName = "hwreport-{0}.exe" -f [guid]::NewGuid().ToString('N')
+    $bytes = [IO.File]::ReadAllBytes($ExePath)
+    $chunkSize = 1MB
+    $ready = @($sessions)
+
+    for ($offset = 0; $offset -lt $bytes.Length -and $ready.Count -gt 0; $offset += $chunkSize) {
+        $length = [Math]::Min($chunkSize, $bytes.Length - $offset)
+        $data = [Convert]::ToBase64String($bytes, $offset, $length)
+        $copyErrors = @()
+        Invoke-Command -Session $ready -ThrottleLimit $ThrottleLimit `
+            -ArgumentList $remoteName, $data, ($offset -eq 0) `
+            -ErrorAction SilentlyContinue -ErrorVariable copyErrors -ScriptBlock {
+            param([string]$Name, [string]$Data, [bool]$First)
+            $path = Join-Path $env:TEMP $Name
+            if ($First) { $mode = [IO.FileMode]::Create } else { $mode = [IO.FileMode]::Append }
+            $buffer = [Convert]::FromBase64String($Data)
+            $stream = New-Object IO.FileStream $path, $mode
+            try { $stream.Write($buffer, 0, $buffer.Length) } finally { $stream.Close() }
+        }
+        foreach ($e in $copyErrors) {
+            $origin = $e.OriginInfo.PSComputerName
+            if ($origin -and $results.ContainsKey($origin)) {
+                $results[$origin].Detail = "Copy: $($e.Exception.Message)"
+                $ready = @($ready | Where-Object { $_.ComputerName -ne $origin })
             }
-            Copy-Item -LiteralPath $ExePath -Destination $remoteExe -ToSession $s -Force
-            $ready += [pscustomobject]@{ Session = $s; RemoteExe = $remoteExe }
-        } catch {
-            $results[$s.ComputerName].Detail = "Copy: $($_.Exception.Message)"
         }
     }
 
@@ -153,26 +171,24 @@ try {
     $runErrors = @()
     $outputs = @()
     if ($ready.Count -gt 0) {
-        # Each session gets its own exe path, so run per-session jobs in parallel.
-        $jobs = foreach ($r in $ready) {
-            Invoke-Command -Session $r.Session -AsJob -ArgumentList $r.RemoteExe -ScriptBlock {
-                param([string]$ExeFile)
-                $out = Join-Path $env:TEMP ("hwreport-{0}.json" -f [guid]::NewGuid().ToString('N'))
-                try {
-                    $text = & $ExeFile --out $out 2>&1 | ForEach-Object { "$_" }
-                    if ($LASTEXITCODE -ne 0) {
-                        throw ("hwreport exited with code {0}: {1}" -f $LASTEXITCODE, ($text -join ' '))
-                    }
-                    [pscustomobject]@{
-                        ComputerName = $env:COMPUTERNAME
-                        Json         = [IO.File]::ReadAllText($out)
-                    }
-                } finally {
-                    Remove-Item -LiteralPath $ExeFile, $out -Force -ErrorAction SilentlyContinue
+        $outputs = @(Invoke-Command -Session $ready -ThrottleLimit $ThrottleLimit `
+            -ArgumentList $remoteName -ErrorAction SilentlyContinue -ErrorVariable runErrors -ScriptBlock {
+            param([string]$Name)
+            $exe = Join-Path $env:TEMP $Name
+            $out = Join-Path $env:TEMP ("hwreport-{0}.json" -f [guid]::NewGuid().ToString('N'))
+            try {
+                $text = & $exe --out $out 2>&1 | ForEach-Object { "$_" }
+                if ($LASTEXITCODE -ne 0) {
+                    throw ("hwreport exited with code {0}: {1}" -f $LASTEXITCODE, ($text -join ' '))
                 }
+                New-Object PSObject -Property @{
+                    ComputerName = $env:COMPUTERNAME
+                    Json         = [IO.File]::ReadAllText($out)
+                }
+            } finally {
+                Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
             }
-        }
-        $outputs = @($jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction SilentlyContinue -ErrorVariable runErrors)
+        })
     }
 
     foreach ($e in $runErrors) {
@@ -201,7 +217,17 @@ try {
         $results[$hostKey].Report = Split-Path -Leaf $path
     }
 } finally {
-    if ($sessions.Count -gt 0) { Remove-PSSession -Session $sessions }
+    if ($sessions.Count -gt 0) {
+        # Remove the exe everywhere, including hosts where the copy failed halfway.
+        if ($remoteName) {
+            Invoke-Command -Session $sessions -ThrottleLimit $ThrottleLimit -ArgumentList $remoteName `
+                -ErrorAction SilentlyContinue -ScriptBlock {
+                param([string]$Name)
+                Remove-Item -LiteralPath (Join-Path $env:TEMP $Name) -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Remove-PSSession -Session $sessions
+    }
 }
 
 foreach ($r in $results.Values) {
