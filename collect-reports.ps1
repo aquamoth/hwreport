@@ -1,128 +1,230 @@
-#Requires -Version 7.0
-#Requires -Modules ActiveDirectory
+#Requires -Version 5.1
 <#
 .SYNOPSIS
-Collects hwreport JSON files from every reachable domain-joined Windows
-computer and stores them in a local folder.
+Runs hwreport.exe on every reachable domain computer over WinRM and collects
+the JSON reports into one local folder.
 
 .DESCRIPTION
-Enumerates enabled Windows computers from Active Directory, probes WinRM
-(TCP 5985) in parallel to decide which are online, then for each online
-host opens a PSSession, copies hwreport.exe to the remote TEMP, runs it,
-copies the resulting JSON back, and cleans up.
+Run this from a domain-joined office PC or server. It:
 
-The caller must be able to:
-  - query AD (RSAT ActiveDirectory module installed)
-  - open WinRM sessions to the targets as an administrator
+  1. lists enabled Windows computers from Active Directory (or uses -ComputerName),
+  2. opens a PowerShell remoting (WinRM) session to all of them in parallel,
+  3. copies hwreport.exe to each machine, runs it, and pulls the JSON back,
+  4. removes hwreport.exe and the JSON from the remote machine again,
+  5. writes a CSV with each host's result next to the reports, and
+  6. builds overview.html if hwoverview.exe sits next to hwreport.exe.
+
+Works in Windows PowerShell 5.1 and PowerShell 7. Requirements:
+  - WinRM enabled on the target PCs (Windows 11 clients have it off by
+    default; enable it by Group Policy, see README.md)
+  - an account that is a local administrator on the targets
+  - the RSAT ActiveDirectory module, unless you pass -ComputerName
+
+Machines that are off, asleep or unreachable are listed as failed in the CSV.
+Run the script again later with -ComputerName set to just those.
 
 .PARAMETER OutputDir
-Local folder that will receive the JSON reports. Created if missing.
+Local folder that receives the JSON reports. Created if missing.
 
 .PARAMETER ExePath
-Path to the hwreport.exe to deploy. Defaults to .\hwreport.exe.
+Path to hwreport.exe. Defaults to hwreport.exe next to this script.
 
-.PARAMETER ThrottleLimit
-Maximum number of hosts processed in parallel.
+.PARAMETER Credential
+Admin account to connect with. Omit it to use the logged-in account.
+Pass (Get-Credential) to be prompted, for example for OFFICE\admin.
+
+.PARAMETER ComputerName
+Explicit list of computers. Skips the Active Directory lookup.
 
 .PARAMETER Filter
-Optional additional AD filter clause (LDAP-style PowerShell filter). For
-example: "Name -like 'OFFICE-*'" to restrict to a naming prefix.
+Extra Get-ADComputer filter clause, for example "Name -like 'OFFICE-*'".
+
+.PARAMETER SearchBase
+AD distinguished name to search under, for example
+"OU=Workstations,DC=office,DC=local".
+
+.PARAMETER ThrottleLimit
+Maximum number of hosts handled at the same time.
 
 .EXAMPLE
-.\collect-reports.ps1 -OutputDir .\reports
+.\collect-reports.ps1 -Credential (Get-Credential OFFICE\admin)
 
 .EXAMPLE
-.\collect-reports.ps1 -OutputDir D:\hwreport -Filter "Name -like 'LAB-*'"
+.\collect-reports.ps1 -SearchBase "OU=Workstations,DC=office,DC=local" -OutputDir D:\hwreport
+
+.EXAMPLE
+.\collect-reports.ps1 -ComputerName PC-014, PC-022 -Credential (Get-Credential)
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputDir     = ".\reports",
-    [string]$ExePath       = ".\hwreport.exe",
-    [int]   $ThrottleLimit = 16,
-    [string]$Filter
+    [string]   $OutputDir = '.\reports',
+    [string]   $ExePath,
+    [pscredential][System.Management.Automation.Credential()]
+               $Credential = [pscredential]::Empty,
+    [string[]] $ComputerName,
+    [string]   $Filter,
+    [string]   $SearchBase,
+    [int]      $ThrottleLimit = 32
 )
 
 $ErrorActionPreference = 'Stop'
 
+if (-not $ExePath) { $ExePath = Join-Path $PSScriptRoot 'hwreport.exe' }
 $ExePath = (Resolve-Path -LiteralPath $ExePath).Path
-$null    = New-Item -ItemType Directory -Force -Path $OutputDir
+$null = New-Item -ItemType Directory -Force -Path $OutputDir
 $OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
-Write-Host "Querying Active Directory..."
-$adFilter = "Enabled -eq `$true -and OperatingSystem -like '*Windows*'"
-if ($Filter) { $adFilter = "($adFilter) -and ($Filter)" }
+$credSplat = @{}
+if ($Credential -ne [pscredential]::Empty) { $credSplat.Credential = $Credential }
 
-$computers = Get-ADComputer -Filter $adFilter -Properties DNSHostName |
-    Where-Object DNSHostName |
-    Select-Object -ExpandProperty DNSHostName
+# --- 1. Target list ----------------------------------------------------------
 
-Write-Host ("AD returned {0} enabled Windows computers. Probing WinRM (5985)..." -f $computers.Count)
+if ($ComputerName) {
+    # Also accept "PC-1,PC-2" as one string (what powershell.exe -File passes).
+    $targets = @($ComputerName -split '[,\s]+' | Where-Object { $_ } | Sort-Object -Unique)
+} else {
+    if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+        throw 'The ActiveDirectory module (RSAT) is not installed. Install it, or pass -ComputerName.'
+    }
+    Import-Module ActiveDirectory
 
-$reachable = $computers | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
-    try {
-        $c = New-Object System.Net.Sockets.TcpClient
-        $iar = $c.BeginConnect($_, 5985, $null, $null)
-        if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $c.Connected) {
-            $c.EndConnect($iar) | Out-Null
-            $_
-        }
-        $c.Close()
-    } catch { }
+    $adFilter = "Enabled -eq `$true -and OperatingSystem -like '*Windows*'"
+    if ($Filter) { $adFilter = "($adFilter) -and ($Filter)" }
+    $adArgs = @{ Filter = $adFilter; Properties = 'DNSHostName' } + $credSplat
+    if ($SearchBase) { $adArgs.SearchBase = $SearchBase }
+
+    Write-Host 'Querying Active Directory...'
+    $targets = @(Get-ADComputer @adArgs |
+        Where-Object DNSHostName |
+        Select-Object -ExpandProperty DNSHostName |
+        Sort-Object -Unique)
 }
 
-Write-Host ("{0} reachable over WinRM. Collecting reports..." -f @($reachable).Count)
+if ($targets.Count -eq 0) { throw 'No target computers found.' }
+Write-Host ("{0} target computers. Connecting over WinRM..." -f $targets.Count)
 
-$results = $reachable | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
-    $name   = $_
-    $exe    = $using:ExePath
-    $dir    = $using:OutputDir
-    $short  = $name.Split('.')[0]
+# --- 2. Open sessions (in parallel) -----------------------------------------
 
-    try {
-        $session = New-PSSession -ComputerName $name -ErrorAction Stop
+$results = @{}
+foreach ($t in $targets) {
+    $results[$t] = [pscustomobject]@{ Host = $t; Status = 'FAIL'; Detail = ''; Report = '' }
+}
+
+$sessionOption = New-PSSessionOption -OpenTimeout 15000
+$connectErrors = @()
+$sessions = @(New-PSSession -ComputerName $targets -SessionOption $sessionOption `
+        -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue `
+        -ErrorVariable connectErrors @credSplat)
+
+$connected = @{}
+foreach ($s in $sessions) { $connected[$s.ComputerName] = $true }
+foreach ($t in $targets) {
+    if ($connected.ContainsKey($t)) { continue }
+    $msg = $connectErrors |
+        ForEach-Object { $_.Exception.Message } |
+        Where-Object { $_ -like "*$t*" } |
+        Select-Object -First 1
+    if (-not $msg) { $msg = 'Could not connect.' }
+    $results[$t].Detail = "Connect: $msg"
+}
+
+Write-Host ("Connected to {0} of {1}. Copying hwreport.exe..." -f $sessions.Count, $targets.Count)
+
+try {
+    # --- 3. Copy the exe to each session -------------------------------------
+
+    $ready = @()
+    foreach ($s in $sessions) {
         try {
-            $remoteExe = Invoke-Command -Session $session -ScriptBlock {
-                Join-Path $env:TEMP 'hwreport.exe'
+            $remoteExe = Invoke-Command -Session $s -ScriptBlock {
+                Join-Path $env:TEMP ("hwreport-{0}.exe" -f [guid]::NewGuid().ToString('N'))
             }
-            $remoteOut = Invoke-Command -Session $session -ScriptBlock {
-                Join-Path $env:TEMP ("hwreport-{0}.json" -f [guid]::NewGuid().ToString('N'))
-            }
-
-            Copy-Item -LiteralPath $exe -Destination $remoteExe -ToSession $session -Force
-
-            Invoke-Command -Session $session -ScriptBlock {
-                param($e, $o)
-                & $e --out $o | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw "hwreport exited $LASTEXITCODE" }
-            } -ArgumentList $remoteExe, $remoteOut
-
-            $localName = "{0}-{1}.json" -f $short, (Get-Date -Format 'yyyy-MM-dd')
-            $localPath = Join-Path $dir $localName
-            $i = 1
-            while (Test-Path -LiteralPath $localPath) {
-                $localPath = Join-Path $dir ("{0}-{1}-{2}.json" -f $short, (Get-Date -Format 'yyyy-MM-dd'), $i)
-                $i++
-            }
-            Copy-Item -LiteralPath $remoteOut -Destination $localPath -FromSession $session -Force
-
-            Invoke-Command -Session $session -ScriptBlock {
-                param($e, $o)
-                Remove-Item -LiteralPath $e, $o -Force -ErrorAction SilentlyContinue
-            } -ArgumentList $remoteExe, $remoteOut
-
-            [pscustomobject]@{ Host = $name; Status = 'OK'; Path = $localPath }
+            Copy-Item -LiteralPath $ExePath -Destination $remoteExe -ToSession $s -Force
+            $ready += [pscustomobject]@{ Session = $s; RemoteExe = $remoteExe }
+        } catch {
+            $results[$s.ComputerName].Detail = "Copy: $($_.Exception.Message)"
         }
-        finally { Remove-PSSession $session }
     }
-    catch {
-        [pscustomobject]@{ Host = $name; Status = 'FAIL'; Path = $_.Exception.Message }
+
+    # --- 4. Run hwreport on all of them at once ------------------------------
+
+    Write-Host ("Running hwreport on {0} computers..." -f $ready.Count)
+
+    $runErrors = @()
+    $outputs = @()
+    if ($ready.Count -gt 0) {
+        # Each session gets its own exe path, so run per-session jobs in parallel.
+        $jobs = foreach ($r in $ready) {
+            Invoke-Command -Session $r.Session -AsJob -ArgumentList $r.RemoteExe -ScriptBlock {
+                param([string]$ExeFile)
+                $out = Join-Path $env:TEMP ("hwreport-{0}.json" -f [guid]::NewGuid().ToString('N'))
+                try {
+                    $text = & $ExeFile --out $out 2>&1 | ForEach-Object { "$_" }
+                    if ($LASTEXITCODE -ne 0) {
+                        throw ("hwreport exited with code {0}: {1}" -f $LASTEXITCODE, ($text -join ' '))
+                    }
+                    [pscustomobject]@{
+                        ComputerName = $env:COMPUTERNAME
+                        Json         = [IO.File]::ReadAllText($out)
+                    }
+                } finally {
+                    Remove-Item -LiteralPath $ExeFile, $out -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        $outputs = @($jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction SilentlyContinue -ErrorVariable runErrors)
     }
+
+    foreach ($e in $runErrors) {
+        $origin = $e.OriginInfo.PSComputerName
+        if ($origin -and $results.ContainsKey($origin)) {
+            $results[$origin].Detail = "Run: $($e.Exception.Message)"
+        }
+    }
+
+    # --- 5. Save the reports locally ----------------------------------------
+
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    foreach ($o in $outputs) {
+        $hostKey = $o.PSComputerName
+        $base = "{0}-{1}" -f $o.ComputerName, $date
+        $path = Join-Path $OutputDir "$base.json"
+        $i = 1
+        while (Test-Path -LiteralPath $path) {
+            $path = Join-Path $OutputDir ("{0}-{1}.json" -f $base, $i)
+            $i++
+        }
+        [IO.File]::WriteAllText($path, $o.Json, $utf8)
+        $results[$hostKey].Status = 'OK'
+        $results[$hostKey].Detail = ''
+        $results[$hostKey].Report = Split-Path -Leaf $path
+    }
+} finally {
+    if ($sessions.Count -gt 0) { Remove-PSSession -Session $sessions }
 }
 
-$ok   = @($results | Where-Object Status -eq 'OK')
-$fail = @($results | Where-Object Status -eq 'FAIL')
+foreach ($r in $results.Values) {
+    if ($r.Status -ne 'OK' -and -not $r.Detail) { $r.Detail = 'No output returned.' }
+}
 
-$results | Sort-Object Status, Host | Format-Table -AutoSize
+# --- 6. Summary, CSV and overview -------------------------------------------
 
-Write-Host ""
-Write-Host ("Done. {0} succeeded, {1} failed. Reports in {2}" -f $ok.Count, $fail.Count, $OutputDir)
+$rows = @($results.Values | Sort-Object Status, Host)
+$csv = Join-Path $OutputDir ("collect-{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd-HHmm'))
+$csvArgs = @{ LiteralPath = $csv; Encoding = 'UTF8' }
+if ($PSVersionTable.PSVersion.Major -lt 6) { $csvArgs.NoTypeInformation = $true }
+$rows | Export-Csv @csvArgs
+$rows | Format-Table Host, Status, Report, Detail -AutoSize -Wrap
+
+$ok = @($rows | Where-Object Status -eq 'OK').Count
+Write-Host ("Done. {0} succeeded, {1} failed. Reports in {2}" -f $ok, ($rows.Count - $ok), $OutputDir)
+Write-Host ("Per-host results: {0}" -f $csv)
+
+$overviewExe = Join-Path (Split-Path -Parent $ExePath) 'hwoverview.exe'
+if ($ok -gt 0 -and (Test-Path -LiteralPath $overviewExe)) {
+    $overviewHtml = Join-Path $OutputDir 'overview.html'
+    Write-Host 'Building overview...'
+    & $overviewExe --in $OutputDir --out $overviewHtml
+    if ($LASTEXITCODE -eq 0) { Write-Host ("Overview: {0}" -f $overviewHtml) }
+}

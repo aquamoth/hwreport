@@ -105,6 +105,41 @@ HOSTNAME-YYYY-MM-DD-1.json
 HOSTNAME-YYYY-MM-DD-2.json
 ```
 
+## Collecting From Every Office Computer
+
+`collect-reports.ps1` runs `hwreport.exe` on every domain computer over PowerShell remoting (WinRM) and gathers the JSON files in one folder. Nobody has to visit the machines.
+
+### One-time setup: enable WinRM on the PCs
+
+Windows 11 clients have WinRM turned off by default. Turn it on for the office PCs with a Group Policy Object linked to their OU:
+
+1. **Computer Configuration → Policies → Administrative Templates → Windows Components → Windows Remote Management (WinRM) → WinRM Service → Allow remote server management through WinRM**: Enabled, IPv4 filter `*` (or your office subnet).
+2. **Computer Configuration → Policies → Windows Settings → Security Settings → System Services → Windows Remote Management (WS-Management)**: Automatic.
+3. **Computer Configuration → Policies → Windows Settings → Security Settings → Windows Defender Firewall with Advanced Security → Inbound Rules**: add the predefined rule **Windows Remote Management**, for the Domain profile.
+
+PCs pick this up at their next policy refresh (or run `gpupdate /force` on them, or reboot). The account you collect with must be a local administrator on the PCs, which Domain Admins are by default.
+
+### Running a collection
+
+Run from a domain-joined office PC or server, with `hwreport.exe` (and optionally `hwoverview.exe`) next to the script. Getting the computer list from AD needs the RSAT ActiveDirectory module. Windows PowerShell 5.1 or PowerShell 7 both work.
+
+```powershell
+# Every enabled Windows computer in AD, as an admin account you are prompted for
+.\collect-reports.ps1 -Credential (Get-Credential OFFICE\admin) -OutputDir D:\hwreport
+
+# Only one OU, as the logged-in account
+.\collect-reports.ps1 -SearchBase "OU=Workstations,DC=office,DC=local" -OutputDir D:\hwreport
+
+# Retry the machines that were off last time
+.\collect-reports.ps1 -ComputerName PC-014, PC-022 -OutputDir D:\hwreport
+```
+
+The script opens sessions to all machines in parallel, copies `hwreport.exe` into the remote temp folder, runs it, pulls the JSON back and deletes both files from the remote machine. The reports are named `HOSTNAME-YYYY-MM-DD.json`, the same as a local run. Each run also writes `collect-YYYY-MM-DD-HHmm.csv` with every host's result and the reason it failed, if it did. If `hwoverview.exe` is present, the script finishes by building `overview.html` in the output folder.
+
+Machines that are off or asleep show up as failed. Run the script again later. Old reports are kept, and the overview shows the newest one per computer.
+
+Limitation: a remote run has no desktop session, so expect monitor **rotation** and **current resolution** to be empty. Monitor make, model and physical size come from EDID through WMI and are still reported.
+
 ## Building
 
 Requirements:
