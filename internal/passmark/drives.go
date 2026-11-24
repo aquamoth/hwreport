@@ -35,9 +35,12 @@ type DriveCache struct {
 }
 
 type DriveClient struct {
-	cachePath string
-	cache     DriveCache
-	http      *http.Client
+	cachePath  string
+	cache      DriveCache
+	http       *http.Client
+	listPath   string
+	list       []DriveListEntry
+	listLoaded bool
 }
 
 func NewDriveClient(cachePath string) (*DriveClient, error) {
@@ -61,7 +64,53 @@ func NewDriveClient(cachePath string) (*DriveClient, error) {
 		http: &http.Client{
 			Timeout: 20 * time.Second,
 		},
+		listPath: filepath.Join(filepath.Dir(cachePath), driveListFileName),
 	}, nil
+}
+
+func (c *DriveClient) driveList(ctx context.Context) []DriveListEntry {
+	if !c.listLoaded {
+		c.listLoaded = true
+		if list, err := loadDriveList(ctx, c.listPath, time.Now()); err == nil {
+			c.list = list
+		}
+	}
+	return c.list
+}
+
+// lookupViaDriveList matches the model against PassMark's full drive list and
+// reads the speed figures from the drive's own page. If that page can't be read,
+// the Drive Mark from the list is still returned.
+func (c *DriveClient) lookupViaDriveList(ctx context.Context, driveModel string) (DriveLookupResult, bool) {
+	entry, ok := matchDriveList(driveModel, c.driveList(ctx))
+	if !ok {
+		return DriveLookupResult{}, false
+	}
+
+	result := DriveLookupResult{
+		Query:         driveModel,
+		CanonicalName: entry.Name,
+		DriveMark:     entry.DriveMark,
+		LookupURL:     entry.DetailURL,
+		CachedAtUTC:   time.Now().UTC().Format(time.RFC3339),
+	}
+	detailBody, detailURL, _, _, err := c.fetchDriveDetailBody(ctx, driveModel, driveLookupEntry{ID: entry.ID, DetailURL: entry.DetailURL, DriveName: entry.Name, DriveMark: entry.DriveMark})
+	if err != nil {
+		return result, true
+	}
+	if details, err := parseDriveDetailMetrics(detailBody); err == nil {
+		if details.DriveMark != nil {
+			result.DriveMark = details.DriveMark
+		}
+		result.SequentialReadMBps = details.SequentialReadMBps
+		result.SequentialWriteMBps = details.SequentialWriteMBps
+		result.RandomReadWriteMBps = details.RandomReadWriteMBps
+		result.IOPS4KQD1MBps = details.IOPS4KQD1MBps
+	}
+	if detailURL != "" {
+		result.LookupURL = detailURL
+	}
+	return result, true
 }
 
 func (c *DriveClient) Lookup(ctx context.Context, driveModel string) (DriveLookupResult, error) {
@@ -74,6 +123,15 @@ func (c *DriveClient) Lookup(ctx context.Context, driveModel string) (DriveLooku
 		return cached, nil
 	}
 
+	if result, ok := c.lookupViaDriveList(ctx, driveModel); ok {
+		c.cache.Entries[key] = result
+		if err := c.save(); err != nil {
+			return DriveLookupResult{}, err
+		}
+		return result, nil
+	}
+
+	// Fallback when the drive list can't be downloaded: the exact-name lookup.
 	candidates := driveLookupCandidates(driveModel)
 	var lastErr error
 	for _, candidate := range candidates {
@@ -527,6 +585,8 @@ func parseDriveDetailMetrics(body string) (driveDetailMetrics, error) {
 		}
 	}
 
+	// Pages for older drives often have a Drive Mark but no speed table; the
+	// figures that are missing stay nil.
 	if details.SequentialReadMBps, err = parseMetricFloat(body, "Sequential Read"); err != nil {
 		return driveDetailMetrics{}, err
 	}
@@ -539,15 +599,20 @@ func parseDriveDetailMetrics(body string) (driveDetailMetrics, error) {
 	if details.IOPS4KQD1MBps, err = parseMetricFloat(body, "IOPS 4KQD1"); err != nil {
 		return driveDetailMetrics{}, err
 	}
+	if details.DriveMark == nil && details.SequentialReadMBps == nil && details.SequentialWriteMBps == nil &&
+		details.RandomReadWriteMBps == nil && details.IOPS4KQD1MBps == nil {
+		return driveDetailMetrics{}, fmt.Errorf("drive benchmark page has no drive mark or speed figures")
+	}
 
 	return details, nil
 }
 
+// parseMetricFloat returns nil when the page has no row for the label.
 func parseMetricFloat(body, label string) (*float64, error) {
 	pattern := regexp.MustCompile(`(?s)<tr[^>]*>\s*<th>` + regexp.QuoteMeta(label) + `</th>\s*<td>\s*([\d.,]+)\s*MBytes/Sec\s*</td>`)
 	matches := pattern.FindStringSubmatch(body)
 	if len(matches) != 2 {
-		return nil, fmt.Errorf("drive benchmark metric not found for %q", label)
+		return nil, nil
 	}
 
 	value, err := strconv.ParseFloat(strings.ReplaceAll(matches[1], ",", ""), 64)
