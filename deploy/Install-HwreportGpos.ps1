@@ -1,8 +1,8 @@
 #Requires -Version 3.0
 <#
 .SYNOPSIS
-Creates the hwreport drop share, the Workstations OU and two unlinked GPOs:
-"WinRM - LAN admins" and "hwreport inventory".
+Creates the hwreport share, the Workstations OU and the unlinked GPO
+"WinRM - LAN admins" that collect-reports.ps1 needs.
 
 .DESCRIPTION
 Run on a domain controller as a Domain Admin (Windows PowerShell 3.0+, with
@@ -12,10 +12,10 @@ the DC the script runs on; normal replication carries them to the other DCs.
 The script never links a GPO. Link them yourself, for example:
   New-GPLink -Name 'WinRM - LAN admins' -Target 'OU=Workstations,DC=CosmoJPN,DC=local'
 
-Share  (\\<this DC>\<ShareName>, folder <ShareRoot>)
-  - root:     Domain Users read & execute, so hwreportw.exe can run from it
-  - reports\: Domain Users may create files but not list or read them; each
-              file's creator may write it. Admins have full control.
+Share  (\\<this DC>\<ShareName>, folder <ShareRoot>, with reports\ below it)
+  Administrators only. collect-reports.ps1 runs as an admin, copies
+  hwreportw.exe to each PC over WinRM and saves the reports itself, so users
+  never need access.
 
 GPO "WinRM - LAN admins"
   - Allow remote server management through WinRM (listen on all addresses)
@@ -24,24 +24,15 @@ GPO "WinRM - LAN admins"
   Over the network Windows filters local accounts out of the Administrators
   token, so in practice only domain accounts that are local admins get in.
 
-GPO "hwreport inventory"
-  - Scheduled task (Group Policy Preferences, "remove when no longer applied")
-    that runs as BUILTIN\Users in each signed-in user's session, least
-    privilege. Triggers 5 minutes after logon and monthly on the 1st at 11:00
-    (for people who never sign out). It runs
-    hwreportw.exe --out <share>\reports --once <OnceKey>, so each PC reports once.
-
-Running the script again leaves the share and OU alone, and it refuses to
-overwrite an existing GPO with the same name.
+Running the script again leaves the OU alone, resets the folder permissions,
+and refuses to overwrite an existing GPO with the same name.
 #>
 [CmdletBinding()]
 param(
     [string]$ShareRoot = 'E:\Shares\hwreport',
     [string]$ShareName = 'hwreport$',
     [string]$Subnet    = '192.168.100.0/255.255.255.0',
-    [string]$OnceKey   = 'inventory-2026-11',
-    [string]$WinRMGpoName    = 'WinRM - LAN admins',
-    [string]$InventoryGpoName = 'hwreport inventory'
+    [string]$WinRMGpoName = 'WinRM - LAN admins'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,10 +43,7 @@ $domain  = Get-ADDomain -Server $dc
 $sidOf   = { param($rid) New-Object System.Security.Principal.SecurityIdentifier ("{0}-{1}" -f $domain.DomainSID.Value, $rid) }
 $sidSystem       = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
 $sidAdmins       = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
-$sidCreatorOwner = New-Object System.Security.Principal.SecurityIdentifier 'S-1-3-0'
-$sidAuthUsers    = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'
 $sidDomainAdmins = & $sidOf 512
-$sidDomainUsers  = & $sidOf 513
 $uncRoot = "\\{0}\{1}" -f $env:COMPUTERNAME.ToLower(), $ShareName
 
 Write-Host "Domain controller: $dc"
@@ -85,23 +73,13 @@ $adminRules = @(
     (New-Rule $sidAdmins       'FullControl' 'ContainerInherit,ObjectInherit' 'None'),
     (New-Rule $sidDomainAdmins 'FullControl' 'ContainerInherit,ObjectInherit' 'None')
 )
-Set-ExactAcl $ShareRoot ($adminRules + @(
-    (New-Rule $sidDomainUsers 'ReadAndExecute' 'ContainerInherit,ObjectInherit' 'None')
-))
-Set-ExactAcl $reportsDir ($adminRules + @(
-    # Drop box: create files in this folder, but no listing or reading.
-    (New-Rule $sidDomainUsers  'CreateFiles,ReadAttributes,Synchronize' 'None' 'None'),
-    # Lets hwreport check whether a file name is taken before choosing "-1".
-    (New-Rule $sidDomainUsers  'ReadAttributes,Synchronize' 'ObjectInherit' 'InheritOnly'),
-    # The user who created a report may write it.
-    (New-Rule $sidCreatorOwner 'Write,ReadAttributes,Synchronize' 'ObjectInherit' 'InheritOnly')
-))
+Set-ExactAcl $ShareRoot $adminRules
+Set-ExactAcl $reportsDir $adminRules
 
 if (-not (Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue)) {
-    $authUsers   = $sidAuthUsers.Translate([System.Security.Principal.NTAccount]).Value
     $domainAdmin = $sidDomainAdmins.Translate([System.Security.Principal.NTAccount]).Value
-    New-SmbShare -Name $ShareName -Path $ShareRoot -ChangeAccess $authUsers -FullAccess $domainAdmin `
-        -Description 'hwreport inventory drop folder' | Out-Null
+    New-SmbShare -Name $ShareName -Path $ShareRoot -FullAccess $domainAdmin `
+        -Description 'hwreport inventory' | Out-Null
     Write-Host "Created share $uncRoot"
 } else {
     Write-Host "Share $uncRoot already exists"
@@ -169,9 +147,7 @@ function Add-GppFile($gpo, $relativePath, $xml, $extensionPairs) {
 
 $cseNull      = '{00000000-0000-0000-0000-000000000000}'
 $cseServices  = '{91FBB303-0CD5-4055-BF42-E512A681B325}'; $toolServices = '{CC5746A9-9B74-4BE5-AE2E-64379C86E0E4}'
-$cseTasks     = '{AADCED64-746C-4633-A97C-D61349046527}'; $toolTasks    = '{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}'
 $changed = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-$author  = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 # --- GPO: WinRM - LAN admins ---------------------------------------------------------
 
@@ -192,20 +168,6 @@ $servicesXml = @"
 Add-GppFile $winrm 'Services\Services.xml' $servicesXml @(@($cseNull, $toolServices), @($cseServices, $toolServices))
 Write-Host "Created GPO '$WinRMGpoName' ($($winrm.Id))"
 
-# --- GPO: hwreport inventory ------------------------------------------------------
-
-$inventory = New-EmptyGpo $InventoryGpoName "One report per PC: runs $uncRoot\hwreportw.exe as the signed-in user (not SYSTEM). Unlink to remove the task. Created by deploy\Install-HwreportGpos.ps1."
-$exe  = "$uncRoot\hwreportw.exe"
-$taskArgs = "--out $uncRoot\reports --once $OnceKey"
-$today = Get-Date
-$start = (New-Object DateTime ($today.Year, $today.Month, 1)).AddMonths(1).ToString('yyyy-MM-dd') + 'T11:00:00'
-$taskXml = @"
-<?xml version="1.0" encoding="utf-8"?>
-<ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}"><TaskV2 clsid="{D8896631-B747-47a7-84A6-C155337F3BC8}" name="hwreport inventory" image="1" changed="$changed" uid="{$([guid]::NewGuid().ToString().ToUpper())}" removePolicy="1" userContext="0"><Properties action="R" name="hwreport inventory" runAs="BUILTIN\Users" logonType="Group"><Task version="1.2"><RegistrationInfo><Author>$author</Author><Description>Hardware inventory: writes one hwreport JSON per PC to $uncRoot\reports. Managed by the GPO "$InventoryGpoName".</Description></RegistrationInfo><Principals><Principal id="Author"><GroupId>BUILTIN\Users</GroupId><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><IdleSettings><Duration>PT10M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT10M</ExecutionTimeLimit><Priority>7</Priority></Settings><Triggers><LogonTrigger><Enabled>true</Enabled><Delay>PT5M</Delay></LogonTrigger><CalendarTrigger><StartBoundary>$start</StartBoundary><Enabled>true</Enabled><ScheduleByMonth><DaysOfMonth><Day>1</Day></DaysOfMonth><Months><January/><February/><March/><April/><May/><June/><July/><August/><September/><October/><November/><December/></Months></ScheduleByMonth></CalendarTrigger></Triggers><Actions Context="Author"><Exec><Command>$exe</Command><Arguments>$taskArgs</Arguments></Exec></Actions></Task></Properties></TaskV2>
-</ScheduledTasks>
-"@
-Add-GppFile $inventory 'ScheduledTasks\ScheduledTasks.xml' $taskXml @(@($cseNull, $toolTasks), @($cseTasks, $toolTasks))
-Write-Host "Created GPO '$InventoryGpoName' ($($inventory.Id))"
 
 Write-Host ""
-Write-Host "Next: copy hwreportw.exe (and hwreport.exe, hwoverview.exe) to $ShareRoot, then link the GPOs."
+Write-Host "Next: copy hwreportw.exe, hwoverview.exe and collect-reports.ps1 to $ShareRoot, then link the GPO to the Workstations OU."

@@ -21,7 +21,8 @@ on the computer. Computers where nobody is signed in are skipped and listed,
 unless you pass -AllowNoUser.
 
 A computer counts as complete once -OutputDir holds a report for it that was
-taken in a user session (with -AllowNoUser, any report counts). Complete
+taken in a user session (with -AllowNoUser, any report counts) by a version
+of hwreport that writes at least -MinSchemaVersion. Complete
 computers are skipped, so the script can run repeatedly, for example hourly,
 and only reaches the ones still missing. Pass -IncludeReported to collect from
 them again.
@@ -67,6 +68,10 @@ instead of skipping. Monitor resolution and rotation are then missing.
 .PARAMETER IncludeReported
 Also run on computers that already have a report in -OutputDir.
 
+.PARAMETER MinSchemaVersion
+Reports with an older schema_version don't count as complete, so those
+computers are collected again. 4 = reports with free space per drive.
+
 .PARAMETER Authentication
 WinRM authentication mechanism. The default works from a domain-joined
 machine. From a machine outside the domain, pass Kerberos together with
@@ -92,6 +97,7 @@ param(
     [string]   $SearchBase,
     [switch]   $AllowNoUser,
     [switch]   $IncludeReported,
+    [int]      $MinSchemaVersion = 4,
     [System.Management.Automation.Runspaces.AuthenticationMechanism]
                $Authentication = 'Default',
     [int]      $ThrottleLimit = 32
@@ -139,12 +145,14 @@ foreach ($t in $targets) {
 
 if (-not $IncludeReported) {
     # Hostnames that already have a complete report in the output folder:
-    # taken in a user session, or any report when -AllowNoUser is given.
+    # taken in a user session (or any report when -AllowNoUser is given) and
+    # at least -MinSchemaVersion.
     $reported = @{}
     foreach ($f in Get-ChildItem -LiteralPath $OutputDir -Filter '*.json' -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }) {
         if ($f.Name -like '.*') { continue }
         try { $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $j = $null }
         if (-not $j -or -not $j.hostname) { continue }
+        if ([int]$j.schema_version -lt $MinSchemaVersion) { continue }
         if ($j.logged_in_user -or $AllowNoUser) { $reported[([string]$j.hostname).ToUpper()] = $f.Name }
     }
     $remaining = @()
