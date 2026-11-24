@@ -27,6 +27,8 @@ type LookupResult struct {
 	// roughly when the CPU came on the market.
 	FirstSeen        string `json:"first_seen,omitempty"`
 	FirstSeenChecked bool   `json:"first_seen_checked,omitempty"`
+	// NotFound records a CPU PassMark doesn't know; see missRetryAfter.
+	NotFound bool `json:"not_found,omitempty"`
 }
 
 type Cache struct {
@@ -71,6 +73,12 @@ func (c *Client) Lookup(ctx context.Context, cpuModel string) (LookupResult, err
 		return LookupResult{}, fmt.Errorf("empty cpu model")
 	}
 
+	if cached, ok := c.cache.Entries[key]; ok && cached.NotFound {
+		if recentlyCached(cached.CachedAtUTC, time.Now()) {
+			return LookupResult{}, fmt.Errorf("cpu %q is not on PassMark", cpuModel)
+		}
+		delete(c.cache.Entries, key)
+	}
 	if cached, ok := c.cache.Entries[key]; ok {
 		if !cached.FirstSeenChecked {
 			// Entries cached before first_seen existed.
@@ -85,6 +93,7 @@ func (c *Client) Lookup(ctx context.Context, cpuModel string) (LookupResult, err
 
 	candidates := lookupCandidates(cpuModel)
 	var lastErr error
+	siteFailed := false
 	for _, candidate := range candidates {
 		result, err := c.lookupCandidate(ctx, candidate)
 		if err == nil {
@@ -95,11 +104,21 @@ func (c *Client) Lookup(ctx context.Context, cpuModel string) (LookupResult, err
 			}
 			return result, nil
 		}
+		if text := err.Error(); strings.HasPrefix(text, "request passmark lookup") || strings.HasPrefix(text, "passmark lookup returned") || strings.HasPrefix(text, "read passmark lookup") {
+			siteFailed = true
+		}
 		lastErr = err
 	}
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no passmark lookup candidates")
+	}
+	if !siteFailed {
+		// PassMark answered but doesn't know this CPU: don't ask again for a while.
+		c.cache.Entries[key] = LookupResult{Query: cpuModel, NotFound: true, CachedAtUTC: time.Now().UTC().Format(time.RFC3339)}
+		if err := c.save(); err != nil {
+			return LookupResult{}, err
+		}
 	}
 	return LookupResult{}, lastErr
 }

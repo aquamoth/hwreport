@@ -28,6 +28,18 @@ type DriveLookupResult struct {
 	IOPS4KQD1MBps       *float64 `json:"iops_4kqd1_mbps"`
 	LookupURL           string   `json:"lookup_url"`
 	CachedAtUTC         string   `json:"cached_at_utc"`
+	// NotFound records a drive that isn't in PassMark's list, so it isn't
+	// looked up again until missRetryAfter has passed.
+	NotFound bool `json:"not_found,omitempty"`
+}
+
+// missRetryAfter is how long a drive or CPU that PassMark doesn't know is left
+// alone before it is looked up again.
+const missRetryAfter = 30 * 24 * time.Hour
+
+func recentlyCached(cachedAtUTC string, now time.Time) bool {
+	cachedAt, err := time.Parse(time.RFC3339, cachedAtUTC)
+	return err == nil && now.Sub(cachedAt) < missRetryAfter
 }
 
 type DriveCache struct {
@@ -119,8 +131,14 @@ func (c *DriveClient) Lookup(ctx context.Context, driveModel string) (DriveLooku
 		return DriveLookupResult{}, fmt.Errorf("empty drive model")
 	}
 
+	now := time.Now()
 	if cached, ok := c.cache.Entries[key]; ok {
-		return cached, nil
+		if !cached.NotFound {
+			return cached, nil
+		}
+		if recentlyCached(cached.CachedAtUTC, now) {
+			return DriveLookupResult{}, fmt.Errorf("drive %q is not in PassMark's drive list", driveModel)
+		}
 	}
 
 	if result, ok := c.lookupViaDriveList(ctx, driveModel); ok {
@@ -129,6 +147,14 @@ func (c *DriveClient) Lookup(ctx context.Context, driveModel string) (DriveLooku
 			return DriveLookupResult{}, err
 		}
 		return result, nil
+	}
+	if len(c.driveList(ctx)) > 0 {
+		// The full list doesn't have it; the exact-name lookup won't either.
+		c.cache.Entries[key] = DriveLookupResult{Query: driveModel, NotFound: true, CachedAtUTC: now.UTC().Format(time.RFC3339)}
+		if err := c.save(); err != nil {
+			return DriveLookupResult{}, err
+		}
+		return DriveLookupResult{}, fmt.Errorf("drive %q is not in PassMark's drive list", driveModel)
 	}
 
 	// Fallback when the drive list can't be downloaded: the exact-name lookup.

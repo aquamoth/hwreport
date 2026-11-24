@@ -23,7 +23,12 @@ type LookupResult struct {
 	PhysicalUnit   string   `json:"physical_unit"`
 	LookupURL      string   `json:"lookup_url"`
 	CachedAtUTC    string   `json:"cached_at_utc"`
+	// NotFound records a monitor the site has no size for, so it isn't asked
+	// again until missRetryAfter has passed.
+	NotFound bool `json:"not_found,omitempty"`
 }
+
+const missRetryAfter = 30 * 24 * time.Hour
 
 type Cache struct {
 	Entries map[string]LookupResult `json:"entries"`
@@ -64,8 +69,14 @@ func (c *Client) Lookup(ctx context.Context, pnpID string) (LookupResult, error)
 	if pnpID == "" {
 		return LookupResult{}, fmt.Errorf("empty monitor pnp id")
 	}
+	now := time.Now()
 	if cached, ok := c.cache.Entries[pnpID]; ok {
-		return cached, nil
+		if !cached.NotFound {
+			return cached, nil
+		}
+		if cachedAt, err := time.Parse(time.RFC3339, cached.CachedAtUTC); err == nil && now.Sub(cachedAt) < missRetryAfter {
+			return LookupResult{}, fmt.Errorf("monitor %s has no size on linux-hardware.org", pnpID)
+		}
 	}
 
 	vendor := pnpID[:3]
@@ -77,6 +88,11 @@ func (c *Client) Lookup(ctx context.Context, pnpID string) (LookupResult, error)
 
 	name, width, height, err := parseLinuxHardwareMonitor(body)
 	if err != nil {
+		// The site answered but has no size: remember that.
+		c.cache.Entries[pnpID] = LookupResult{Query: pnpID, NotFound: true, CachedAtUTC: now.UTC().Format(time.RFC3339)}
+		if saveErr := c.save(); saveErr != nil {
+			return LookupResult{}, saveErr
+		}
 		return LookupResult{}, err
 	}
 
