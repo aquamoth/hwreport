@@ -23,6 +23,10 @@ type LookupResult struct {
 	CPUMark       *int   `json:"cpu_mark"`
 	LookupURL     string `json:"lookup_url"`
 	CachedAtUTC   string `json:"cached_at_utc"`
+	// FirstSeen is PassMark's "CPU First Seen on Charts", e.g. "Q2 2013":
+	// roughly when the CPU came on the market.
+	FirstSeen        string `json:"first_seen,omitempty"`
+	FirstSeenChecked bool   `json:"first_seen_checked,omitempty"`
 }
 
 type Cache struct {
@@ -68,6 +72,14 @@ func (c *Client) Lookup(ctx context.Context, cpuModel string) (LookupResult, err
 	}
 
 	if cached, ok := c.cache.Entries[key]; ok {
+		if !cached.FirstSeenChecked {
+			// Entries cached before first_seen existed.
+			c.fillFirstSeen(ctx, &cached)
+			c.cache.Entries[key] = cached
+			if err := c.save(); err != nil {
+				return LookupResult{}, err
+			}
+		}
 		return cached, nil
 	}
 
@@ -76,6 +88,7 @@ func (c *Client) Lookup(ctx context.Context, cpuModel string) (LookupResult, err
 	for _, candidate := range candidates {
 		result, err := c.lookupCandidate(ctx, candidate)
 		if err == nil {
+			c.fillFirstSeen(ctx, &result)
 			c.cache.Entries[key] = result
 			if err := c.save(); err != nil {
 				return LookupResult{}, err
@@ -132,6 +145,48 @@ func (c *Client) lookupCandidate(ctx context.Context, candidate string) (LookupR
 		LookupURL:     canonicalURL,
 		CachedAtUTC:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+var (
+	lookupIDRegexp  = regexp.MustCompile(`[?&]id=(\d+)`)
+	firstSeenRegexp = regexp.MustCompile(`CPU First Seen on Charts:</strong>\s*([^<]+?)\s*</p>`)
+)
+
+// fillFirstSeen reads the CPU's own page for its first-seen date. A network
+// error leaves the entry unchecked so the next run tries again.
+func (c *Client) fillFirstSeen(ctx context.Context, result *LookupResult) {
+	idMatch := lookupIDRegexp.FindStringSubmatch(result.LookupURL)
+	if idMatch == nil {
+		result.FirstSeenChecked = true
+		return
+	}
+	detailURL := "https://www.cpubenchmark.net/cpu.php?cpu=" + url.QueryEscape(result.CanonicalName) + "&id=" + idMatch[1]
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, detailURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", browserUserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	body, err := ioReadAll(resp)
+	if err != nil {
+		return
+	}
+	result.FirstSeen = parseFirstSeen(string(body))
+	result.FirstSeenChecked = true
+}
+
+func parseFirstSeen(body string) string {
+	if m := firstSeenRegexp.FindStringSubmatch(body); m != nil {
+		return strings.TrimSpace(html.UnescapeString(m[1]))
+	}
+	return ""
 }
 
 func (c *Client) save() error {
