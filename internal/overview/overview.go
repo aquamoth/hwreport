@@ -507,6 +507,10 @@ func renderPage(data pageData) ([]byte, error) {
 		"fmtString": func(value string) string {
 			return strings.TrimSpace(value)
 		},
+		// "2026-11-24 03:22 UTC" -> ["2026-11-24", "03:22 UTC"]
+		"splitDate": func(value string) []string {
+			return strings.SplitN(strings.TrimSpace(value), " ", 2)
+		},
 		"smartClass": func(value string) string {
 			switch smartSeverity(value) {
 			case 3:
@@ -846,13 +850,20 @@ const pageTemplate = `<!DOCTYPE html>
       border: 1px solid var(--line);
       border-radius: 18px;
       overflow: hidden;
+      /* Grows past the window when the table can't shrink further, so the
+         whole page scrolls sideways (window scrollbar) instead of cutting
+         columns off. */
+      width: fit-content;
+      min-width: 100%;
       box-shadow: 0 14px 36px rgba(53, 48, 36, 0.08);
     }
     table {
       width: 100%;
+      min-width: 1040px;
       border-collapse: collapse;
     }
     thead th {
+      vertical-align: bottom;
       padding: 14px 16px;
       text-align: left;
       font-size: 12px;
@@ -877,7 +888,12 @@ const pageTemplate = `<!DOCTYPE html>
       font-variant-numeric: tabular-nums;
     }
     td.cpu {
-      min-width: 280px;
+      min-width: 220px;
+    }
+    /* Date and time may go on separate lines, but neither breaks itself. */
+    td.date span {
+      display: inline-block;
+      white-space: nowrap;
     }
     .smart-badge {
       display: inline-block;
@@ -885,6 +901,7 @@ const pageTemplate = `<!DOCTYPE html>
       padding: 6px 10px;
       border-radius: 999px;
       text-align: center;
+      white-space: nowrap;
       font-size: 12px;
       font-weight: 700;
       text-transform: uppercase;
@@ -917,11 +934,20 @@ const pageTemplate = `<!DOCTYPE html>
       color: var(--muted);
       font-size: 12px;
     }
+    /* A no-break space keeps the arrow on the same line as the column name. */
     th[aria-sort="ascending"] .sort-button::after {
-      content: " ▲";
+      content: "\00a0▲";
     }
     th[aria-sort="descending"] .sort-button::after {
-      content: " ▼";
+      content: "\00a0▼";
+    }
+    @media (max-width: 700px) {
+      main {
+        padding: 20px 12px 32px;
+      }
+      h1 {
+        font-size: 26px;
+      }
     }
     .sort-button {
       padding: 0;
@@ -960,7 +986,7 @@ const pageTemplate = `<!DOCTYPE html>
           <tr data-row-key="{{ .Identifier }}">
             <td data-sort-value="{{ .Identifier }}"><a href="{{ .DetailHref }}">{{ .Identifier }}</a></td>
             <td data-sort-value="{{ .User }}">{{ .User }}</td>
-            <td data-sort-value="{{ .ReportDate }}">{{ .ReportDate }}</td>
+            <td class="date" data-sort-value="{{ .ReportDate }}">{{ range splitDate .ReportDate }}<span>{{ . }}</span> {{ end }}</td>
             <td class="cpu" data-sort-value="{{ .CPUModel }}">
               <div>{{ .CPUModel }}</div>
               {{ if .PassMarkURL }}<div class="subtle"><a href="{{ .PassMarkURL }}">PassMark source</a></div>{{ end }}
@@ -1126,6 +1152,8 @@ const detailTemplate = `<!DOCTYPE html>
       border-radius: 18px;
       padding: 18px 20px;
       margin-bottom: 18px;
+      /* Wide tables (storage, monitors) scroll sideways inside the panel. */
+      overflow-x: auto;
       box-shadow: 0 14px 36px rgba(53, 48, 36, 0.08);
     }
     h2 {
@@ -1157,6 +1185,24 @@ const detailTemplate = `<!DOCTYPE html>
       text-transform: uppercase;
       font-size: 12px;
       letter-spacing: 0.08em;
+      vertical-align: bottom;
+    }
+    .list-table td {
+      min-width: 90px;
+    }
+    @media (max-width: 700px) {
+      main {
+        padding: 20px 12px 32px;
+      }
+      h1 {
+        font-size: 26px;
+      }
+      .panel {
+        padding: 14px 12px;
+      }
+      th {
+        width: 40%;
+      }
     }
     .smart-badge {
       display: inline-block;
@@ -1164,6 +1210,7 @@ const detailTemplate = `<!DOCTYPE html>
       padding: 6px 10px;
       border-radius: 999px;
       text-align: center;
+      white-space: nowrap;
       font-size: 12px;
       font-weight: 700;
       text-transform: uppercase;

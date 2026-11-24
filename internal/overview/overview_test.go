@@ -123,7 +123,7 @@ func TestGenerateUsesNewestSnapshotAndLoopsDetailNavigation(t *testing.T) {
 	if !strings.Contains(overviewHTML, "<a href=\"hwreport-details/alpha-2026-04-21.html\">alpha</a>") {
 		t.Fatalf("overview should link the computer name to newest alpha detail page, got:\n%s", overviewHTML)
 	}
-	if !strings.Contains(overviewHTML, "data-sort-value=\"2026-04-21 08:00 UTC\">2026-04-21 08:00 UTC</td>") {
+	if !strings.Contains(overviewHTML, "data-sort-value=\"2026-04-21 08:00 UTC\"><span>2026-04-21</span> <span>08:00 UTC</span> </td>") {
 		t.Fatalf("overview should show newest alpha report date, got:\n%s", overviewHTML)
 	}
 	if !strings.Contains(overviewHTML, "<button type=\"button\" class=\"sort-button\">RAM Type</button>") {
