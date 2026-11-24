@@ -4,6 +4,7 @@ package collector
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +18,9 @@ import (
 )
 
 const createNoWindow = 0x08000000
+
+// collectorTimeout is a variable only so tests can shorten it.
+var collectorTimeout = 3 * time.Minute
 
 func Collect() (*report.Report, error) {
 	hostname, err := os.Hostname()
@@ -35,7 +39,7 @@ func Collect() (*report.Report, error) {
 		return nil, fmt.Errorf("decode collector output: %w", err)
 	}
 
-	out.SchemaVersion = 3
+	out.SchemaVersion = report.CurrentSchemaVersion
 	out.CollectedAtUTC = time.Now().UTC().Format(time.RFC3339)
 	out.Hostname = hostname
 	return &out, nil
@@ -48,7 +52,13 @@ func runCollectorScript() ([]byte, error) {
 	}
 	defer os.RemoveAll(filepath.Dir(scriptPath))
 
-	cmd := exec.Command(
+	// A normal run takes a few seconds. If a WMI or storage query ever hangs,
+	// give up rather than leave a process running in the user's session.
+	ctx, cancel := context.WithTimeout(context.Background(), collectorTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(
+		ctx,
 		"powershell.exe",
 		"-NoLogo",
 		"-NoProfile",
@@ -62,10 +72,15 @@ func runCollectorScript() ([]byte, error) {
 	// hwreportw.exe (no console of its own) started by a scheduled task in a
 	// user's session; output is captured through pipes either way.
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	// After the kill, stop waiting for the output pipes too.
+	cmd.WaitDelay = 5 * time.Second
 
 	output, err := cmd.Output()
 	if err == nil {
 		return output, nil
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("collector script did not finish within %s and was stopped", collectorTimeout)
 	}
 
 	if exitErr, ok := err.(*exec.ExitError); ok {
@@ -328,6 +343,50 @@ function Get-DiskType($physicalMediaType, $mediaType, $model, $status) {
   return $null
 }
 
+function Get-DiskVolumes($diskIndex) {
+  if ($null -eq $diskIndex) { return }
+  foreach ($partition in $partitionsRaw) {
+    if ([string]$partition.DiskNumber -ne [string]$diskIndex) { continue }
+    $letter = [string]$partition.DriveLetter
+    if ($letter -notmatch '^[A-Za-z]$') { continue }
+    $letter = $letter.ToUpperInvariant()
+    $sizeGB = $null
+    $freeGB = $null
+    try {
+      # GetDiskFreeSpaceEx on a local volume: no I/O beyond the volume metadata.
+      $info = New-Object System.IO.DriveInfo ($letter + ':')
+      if ($info.IsReady) {
+        $sizeGB = Convert-BytesToGB $info.TotalSize
+        $freeGB = [math]::Round([double]$info.TotalFreeSpace / 1GB, 2)
+      }
+    } catch { }
+    [ordered]@{
+      drive_letter = $letter + ':'
+      size_gb = $sizeGB
+      free_gb = $freeGB
+    }
+  }
+}
+
+# Earliest Windows install date on this computer. In-place upgrades reset
+# Win32_OperatingSystem.InstallDate but keep the earlier dates under
+# HKLM\SYSTEM\Setup\Source OS (Updated on ...), readable by standard users.
+function Get-FirstWindowsInstallDate($currentInstallDate) {
+  $dates = @()
+  if ($currentInstallDate -is [datetime]) { $dates += $currentInstallDate }
+  try {
+    foreach ($key in @(Get-ChildItem -Path 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' })) {
+      $value = (Get-ItemProperty -Path $key.PSPath -Name InstallDate -ErrorAction SilentlyContinue).InstallDate
+      if ($value -and [int64]$value -gt 0) {
+        $dates += ([datetime]'1970-01-01').AddSeconds([int64]$value)
+      }
+    }
+  } catch { }
+  $earliest = $dates | Where-Object { $_.Year -ge 2000 } | Sort-Object | Select-Object -First 1
+  if ($earliest) { return $earliest.ToString('yyyy-MM-dd') }
+  return $null
+}
+
 function Is-RemovableDisk($disk, $physicalDisk) {
   $mediaType = Normalize-Text $disk.MediaType
   if ($mediaType -eq 'Removable Media') { return $true }
@@ -586,6 +645,10 @@ $disksRaw = @(Get-CimInstance Win32_DiskDrive)
 $physicalMediaRaw = @(Get-CimInstance Win32_PhysicalMedia -ErrorAction SilentlyContinue)
 $physicalDisksRaw = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
 $smartRaw = @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction SilentlyContinue)
+# Drive letters per physical disk. Local partitions only, so network drives are
+# never touched. Optional: on any failure the drives are reported without volumes.
+$partitionsRaw = @()
+try { $partitionsRaw = @(Get-Partition -ErrorAction Stop) } catch { $partitionsRaw = @() }
 $gpusRaw = @(Get-CimInstance Win32_VideoController)
 $desktopMonitorsRaw = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue)
 $monitorIDsRaw = @(Get-CimInstance -Namespace 'root\wmi' -ClassName WmiMonitorID -Filter 'Active = TRUE' -ErrorAction SilentlyContinue)
@@ -729,9 +792,11 @@ foreach ($disk in $disksRaw) {
     manufacturer = Normalize-Manufacturer $(if ($physicalDisk -and $physicalDisk.manufacturer) { $physicalDisk.manufacturer } elseif ($disk.Manufacturer) { $disk.Manufacturer } elseif ($media) { $media.Manufacturer } else { $null })
     model = Normalize-Text $disk.Model
     type = Get-DiskType $(if ($physicalDisk) { $physicalDisk.media_type } else { $null }) $disk.MediaType $disk.Model $disk.Status
+    bus_type = $(if ($physicalDisk) { $physicalDisk.bus_type } else { $null })
     size_gb = Convert-BytesToGB $disk.Size
     manufacture_date = $(if ($media) { Convert-DateOnly $media.ManufactureDate } else { $null })
     smart_status = $smartStatus
+    volumes = @(Get-DiskVolumes $disk.Index)
   }
 }
 ) | Sort-Object model
@@ -803,6 +868,9 @@ foreach ($monitor in $monitorIDsRaw) {
 $computerFirstUse = Convert-DateOnly $computerSystem.InstallDate
 if (-not $computerFirstUse -and $computerSystemProduct) {
   $computerFirstUse = Convert-DateOnly $computerSystemProduct.InstallDate
+}
+if (-not $computerFirstUse) {
+  $computerFirstUse = Get-FirstWindowsInstallDate $operatingSystem.InstallDate
 }
 
 $report = [ordered]@{

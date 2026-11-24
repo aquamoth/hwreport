@@ -1,5 +1,10 @@
 package report
 
+// CurrentSchemaVersion is written into every new report.
+// 4: drives carry bus_type and volumes (drive letter, size, free space), and
+// computer.first_use_date is the earliest Windows install date.
+const CurrentSchemaVersion = 4
+
 type Report struct {
 	SchemaVersion  int       `json:"schema_version"`
 	CollectedAtUTC string    `json:"collected_at_utc"`
@@ -59,10 +64,18 @@ type Drive struct {
 	Manufacturer    *string         `json:"manufacturer"`
 	Model           *string         `json:"model"`
 	Type            *string         `json:"type"`
+	BusType         *string         `json:"bus_type,omitempty"`
 	SizeGB          *float64        `json:"size_gb"`
 	ManufactureDate *string         `json:"manufacture_date"`
 	SmartStatus     *string         `json:"smart_status"`
+	Volumes         []Volume        `json:"volumes,omitempty"`
 	Benchmark       *DriveBenchmark `json:"benchmark,omitempty"`
+}
+
+type Volume struct {
+	DriveLetter string   `json:"drive_letter"`
+	SizeGB      *float64 `json:"size_gb"`
+	FreeGB      *float64 `json:"free_gb"`
 }
 
 type DriveBenchmark struct {
