@@ -43,6 +43,8 @@ type row struct {
 	SmartStatus   string
 	SmartSeverity int
 	PassMarkURL   template.URL
+	CPUFirstSeen  string
+	Status        assessment
 }
 
 type pageData struct {
@@ -76,11 +78,23 @@ type detailPageData struct {
 	Storage        []detailDrive
 	Monitors       []detailMonitor
 	PrettyJSON     string
+	Status         assessment
+	FirstUse       string
+	CPUFirstSeen   string
+}
+
+type detailVolume struct {
+	DriveLetter string
+	SizeGB      *float64
+	FreeGB      *float64
 }
 
 type detailDrive struct {
 	Model               string
 	Type                string
+	Tier                string
+	Speed               string
+	Volumes             []detailVolume
 	SizeGB              *float64
 	SmartStatus         string
 	DriveMark           *int
@@ -180,6 +194,7 @@ func Generate(options Options) (Result, error) {
 			if lookup, err := passmarkClient.Lookup(ctx, cpuModel); err == nil {
 				currentRow.CPUMark = lookup.CPUMark
 				currentRow.PassMarkURL = safeURL(lookup.LookupURL)
+				currentRow.CPUFirstSeen = lookup.FirstSeen
 			}
 		}
 		identifier := currentRow.Identifier
@@ -267,6 +282,13 @@ func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentInde
 		})
 	}
 
+	now := options.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	drives := buildDetailDrives(record.Report, driveClient, ctx)
+	record.Row.Status = assess(record.Report, drives, record.Row.CPUMark, record.Row.CPUFirstSeen, now)
+
 	data := detailPageData{
 		Identifier:     record.Identifier,
 		Version:        options.Version,
@@ -276,9 +298,12 @@ func writeDetailPage(record *sourceRecord, versions []*sourceRecord, currentInde
 		PassMarkURL:    record.Row.PassMarkURL,
 		Versions:       versionLinks,
 		Report:         record.Report,
-		Storage:        buildDetailDrives(record.Report, driveClient, ctx),
+		Storage:        drives,
 		Monitors:       buildDetailMonitors(record.Report, monitorClient, ctx),
 		PrettyJSON:     string(prettyJSONBytes),
+		Status:         record.Row.Status,
+		FirstUse:       describeFirstUse(pointerString(record.Report.Computer.FirstUseDate), now),
+		CPUFirstSeen:   describeCPUFirstSeen(record.Row.CPUFirstSeen, now),
 	}
 	if len(versions) > 1 {
 		previousIndex := currentIndex - 1
@@ -393,6 +418,16 @@ func buildDetailDrives(data *report.Report, driveClient *passmark.DriveClient, c
 				item.IOPS4KQD1MBps = lookup.IOPS4KQD1MBps
 				item.LookupURL = strings.TrimSpace(lookup.LookupURL)
 			}
+		}
+
+		item.Tier = driveTier(item.Type, pointerString(drive.BusType), item.DriveMark)
+		item.Speed = speedClass(item.Tier, item.DriveMark)
+		for _, volume := range drive.Volumes {
+			item.Volumes = append(item.Volumes, detailVolume{
+				DriveLetter: volume.DriveLetter,
+				SizeGB:      volume.SizeGB,
+				FreeGB:      volume.FreeGB,
+			})
 		}
 
 		drives = append(drives, item)
@@ -541,6 +576,9 @@ func renderDetailPage(data detailPageData) ([]byte, error) {
 		"fmtMemorySummary": func(memory report.Memory) string {
 			return memorySummary(memory)
 		},
+		"fmtVolumes": formatVolumes,
+		"levelLabel": func(level int) string { return assessment{Level: level}.Label() },
+		"levelClass": func(level int) string { return assessment{Level: level}.BadgeClass() },
 		"fmtPixels": func(width, height *uint32) string {
 			if width == nil || height == nil {
 				return ""
@@ -914,6 +952,7 @@ const pageTemplate = `<!DOCTYPE html>
             <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">RAM GB</button></th>
             <th aria-sort="none" data-sort-type="number"><button type="button" class="sort-button">Drive GB</button></th>
             <th aria-sort="none" data-sort-type="text"><button type="button" class="sort-button">SMART</button></th>
+            <th aria-sort="none" data-sort-type="number" data-sort-first="descending"><button type="button" class="sort-button">Status</button></th>
           </tr>
         </thead>
         <tbody>
@@ -931,6 +970,7 @@ const pageTemplate = `<!DOCTYPE html>
             <td class="numeric" data-sort-value="{{ fmtGB .MemoryGB }}">{{ fmtGB .MemoryGB }}</td>
             <td class="numeric" data-sort-value="{{ fmtDrive .DriveGB }}">{{ fmtDrive .DriveGB }}</td>
             <td data-sort-value="{{ .SmartStatus }}"><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
+            <td data-sort-value="{{ .Status.SortValue }}"><span class="smart-badge {{ .Status.BadgeClass }}" title="{{ .Status.Summary }}">{{ .Status.Label }}{{ with .Status.Findings }} · {{ len . }}{{ end }}</span></td>
           </tr>
           {{ end }}
         </tbody>
@@ -1008,7 +1048,10 @@ const pageTemplate = `<!DOCTYPE html>
         button.addEventListener('click', function () {
           const columnIndex = headerCell.cellIndex;
           const sortType = headerCell.getAttribute('data-sort-type') || 'text';
-          const nextDirection = headerCell.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+          const currentDirection = headerCell.getAttribute('aria-sort');
+          const nextDirection = currentDirection === 'none'
+            ? (headerCell.getAttribute('data-sort-first') || 'ascending')
+            : (currentDirection === 'ascending' ? 'descending' : 'ascending');
           const rows = Array.from(tbody.rows);
 
           rows.sort(function (leftRow, rightRow) {
@@ -1142,6 +1185,10 @@ const detailTemplate = `<!DOCTYPE html>
       color: var(--bad);
       background: rgba(143, 29, 29, 0.12);
     }
+    .speed {
+      color: var(--muted);
+      font-size: 12px;
+    }
     pre {
       margin: 0;
       overflow: auto;
@@ -1173,6 +1220,19 @@ const detailTemplate = `<!DOCTYPE html>
     </div>
 
     <section class="panel">
+      <h2>Status <span class="smart-badge {{ .Status.BadgeClass }}">{{ .Status.Label }}</span></h2>
+      {{ if .Status.Findings }}
+      <table class="list-table">
+        {{ range .Status.Findings }}
+        <tr><td><span class="smart-badge {{ levelClass .Level }}">{{ levelLabel .Level }}</span></td><td>{{ .Text }}</td></tr>
+        {{ end }}
+      </table>
+      {{ else }}
+      <p class="meta">No findings.</p>
+      {{ end }}
+    </section>
+
+    <section class="panel">
       <h2>Versions</h2>
       <table class="list-table">
         <tr><th>Snapshot</th><th>Open</th></tr>
@@ -1194,6 +1254,9 @@ const detailTemplate = `<!DOCTYPE html>
         <tr><th>OS</th><td>{{ fmtString .Report.OS.Name }} {{ fmtString .Report.OS.Version }}</td></tr>
         <tr><th>CPU</th><td>{{ fmtString .Report.CPU.Model }}</td></tr>
         <tr><th>Memory</th><td>{{ fmtMemorySummary .Report.Memory }}</td></tr>
+        <tr><th>CPU on the market since</th><td>{{ .CPUFirstSeen }}</td></tr>
+        <tr><th>Windows first installed</th><td>{{ .FirstUse }}</td></tr>
+        <tr><th>Current Windows installed</th><td>{{ fmtString .Report.OS.FirstInstallDate }}</td></tr>
       </table>
     </section>
 
@@ -1213,12 +1276,13 @@ const detailTemplate = `<!DOCTYPE html>
     <section class="panel">
       <h2>Storage</h2>
       <table class="list-table">
-        <tr><th>Model</th><th>Type</th><th>Size GB</th><th>SMART</th><th>Drive Mark</th><th>Read</th><th>Write</th><th>IOPS 4KQD1</th><th>Source</th></tr>
+        <tr><th>Model</th><th>Tier</th><th>Size GB</th><th>Free</th><th>SMART</th><th>Drive Mark</th><th>Read</th><th>Write</th><th>IOPS 4KQD1</th><th>Source</th></tr>
         {{ range .Storage }}
         <tr>
           <td>{{ .Model }}</td>
-          <td>{{ .Type }}</td>
+          <td>{{ if .Tier }}{{ .Tier }}{{ else }}{{ .Type }}{{ end }}{{ if .Speed }}<div class="speed">{{ .Speed }}</div>{{ end }}</td>
           <td>{{ fmtGB .SizeGB }}</td>
+          <td>{{ range fmtVolumes .Volumes }}<div>{{ . }}</div>{{ end }}</td>
           <td><span class="smart-badge {{ smartClass .SmartStatus }}">{{ .SmartStatus }}</span></td>
           <td>{{ fmtInt .DriveMark }}</td>
           <td>{{ fmtMaybeFloat .SequentialReadMBps "MB/s" }}</td>
